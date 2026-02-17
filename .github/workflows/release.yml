@@ -19,71 +19,112 @@ jobs:
       - id: version
         run: echo "version=$(tr -d '[:space:]' < VERSION)" >> "$GITHUB_OUTPUT"
 
-  build:
+  build-linux-amd64:
     needs: prepare
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build
+        run: gcc -Wall -Wextra -std=c11 -O2 -Isrc src/*.c -o moxy
+      - name: Smoke test
+        run: ./moxy 2>&1 || true
+      - name: Package
+        run: |
+          mkdir -p dist
+          tar czf "dist/moxy-${{ needs.prepare.outputs.version }}-linux-amd64.tar.gz" moxy
+      - uses: actions/upload-artifact@v4
+        with:
+          name: moxy-linux-amd64
+          path: dist/
+
+  build-linux-arm64:
+    needs: prepare
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install cross-compiler
+        run: sudo apt-get update && sudo apt-get install -y gcc-aarch64-linux-gnu
+      - name: Build
+        run: aarch64-linux-gnu-gcc -Wall -Wextra -std=c11 -O2 -Isrc src/*.c -o moxy
+      - name: Package
+        run: |
+          mkdir -p dist
+          tar czf "dist/moxy-${{ needs.prepare.outputs.version }}-linux-arm64.tar.gz" moxy
+      - uses: actions/upload-artifact@v4
+        with:
+          name: moxy-linux-arm64
+          path: dist/
+
+  build-linux-static:
+    needs: prepare
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install musl
+        run: sudo apt-get update && sudo apt-get install -y musl-tools
+      - name: Build
+        run: musl-gcc -Wall -Wextra -std=c11 -O2 -static -Isrc src/*.c -o moxy
+      - name: Smoke test
+        run: ./moxy 2>&1 || true
+      - name: Package
+        run: |
+          mkdir -p dist
+          tar czf "dist/moxy-${{ needs.prepare.outputs.version }}-linux-amd64-static.tar.gz" moxy
+      - uses: actions/upload-artifact@v4
+        with:
+          name: moxy-linux-amd64-static
+          path: dist/
+
+  build-macos-amd64:
+    needs: prepare
+    runs-on: macos-13
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build
+        run: cc -Wall -Wextra -std=c11 -O2 -Isrc src/*.c -o moxy
+      - name: Smoke test
+        run: ./moxy 2>&1 || true
+      - name: Package
+        run: |
+          mkdir -p dist
+          tar czf "dist/moxy-${{ needs.prepare.outputs.version }}-darwin-amd64.tar.gz" moxy
+      - uses: actions/upload-artifact@v4
+        with:
+          name: moxy-darwin-amd64
+          path: dist/
+
+  build-macos-arm64:
+    needs: prepare
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build
+        run: cc -Wall -Wextra -std=c11 -O2 -Isrc src/*.c -o moxy
+      - name: Smoke test
+        run: ./moxy 2>&1 || true
+      - name: Package
+        run: |
+          mkdir -p dist
+          tar czf "dist/moxy-${{ needs.prepare.outputs.version }}-darwin-arm64.tar.gz" moxy
+      - uses: actions/upload-artifact@v4
+        with:
+          name: moxy-darwin-arm64
+          path: dist/
+
+  package-deb:
+    needs: [prepare, build-linux-amd64, build-linux-arm64]
+    if: ${{ !cancelled() && needs.prepare.result == 'success' && (needs.build-linux-amd64.result == 'success' || needs.build-linux-arm64.result == 'success') }}
+    runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
         include:
-          - os: ubuntu-latest
-            target: linux-amd64
-            cc: gcc
-            cflags: "-O2"
-          - os: ubuntu-latest
-            target: linux-arm64
-            cc: aarch64-linux-gnu-gcc
-            cflags: "-O2"
-            packages: gcc-aarch64-linux-gnu
-          - os: ubuntu-latest
-            target: linux-amd64-static
-            cc: musl-gcc
-            cflags: "-O2 -static"
-            packages: musl-tools
-          - os: macos-13
-            target: darwin-amd64
-            cc: cc
-            cflags: "-O2"
-          - os: macos-14
-            target: darwin-arm64
-            cc: cc
-            cflags: "-O2"
-    runs-on: ${{ matrix.os }}
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Install cross-compiler
-        if: matrix.packages
-        run: sudo apt-get update && sudo apt-get install -y ${{ matrix.packages }}
-
-      - name: Build
-        run: |
-          ${{ matrix.cc }} -Wall -Wextra -std=c11 ${{ matrix.cflags }} -Isrc src/*.c -o moxy
-          chmod +x moxy
-          ./moxy --help 2>&1 || true
-
-      - name: Package
-        env:
-          VERSION: ${{ needs.prepare.outputs.version }}
-          TARGET: ${{ matrix.target }}
-        run: |
-          mkdir -p dist
-          tar czf "dist/moxy-${VERSION}-${TARGET}.tar.gz" moxy
-
-      - uses: actions/upload-artifact@v4
-        with:
-          name: moxy-${{ matrix.target }}
-          path: dist/
-
-  package-deb:
-    needs: [prepare, build]
-    runs-on: ubuntu-latest
-    strategy:
-      matrix:
-        include:
           - target: linux-amd64
             arch: amd64
+            build: build-linux-amd64
           - target: linux-arm64
             arch: arm64
+            build: build-linux-arm64
     steps:
       - uses: actions/download-artifact@v4
         with:
@@ -101,7 +142,7 @@ jobs:
           tar xzf "dist/moxy-${VERSION}-${TARGET}.tar.gz" -C "${PKG}/usr/bin/"
           chmod 755 "${PKG}/usr/bin/moxy"
 
-          cat > "${PKG}/DEBIAN/control" <<EOF
+          cat > "${PKG}/DEBIAN/control" <<CTRL
           Package: moxy
           Version: ${VERSION}
           Section: devel
@@ -113,7 +154,7 @@ jobs:
            Moxy is a C-superset language with modern conveniences like string types,
            auto-format print, tagged enums with match, Result types, generic lists,
            and maps. Compiles .mxy source files to portable C11.
-          EOF
+          CTRL
 
           sed -i 's/^          //' "${PKG}/DEBIAN/control"
           dpkg-deb --build --root-owner-group "${PKG}"
@@ -125,7 +166,8 @@ jobs:
           path: dist/*.deb
 
   package-rpm:
-    needs: [prepare, build]
+    needs: [prepare, build-linux-amd64]
+    if: ${{ !cancelled() && needs.prepare.result == 'success' && needs.build-linux-amd64.result == 'success' }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/download-artifact@v4
@@ -303,7 +345,8 @@ jobs:
           path: dist/install.sh
 
   release:
-    needs: [prepare, build, package-deb, package-rpm, package-arch, installer-script]
+    needs: [prepare, build-linux-amd64, build-linux-arm64, build-linux-static, build-macos-amd64, build-macos-arm64, package-deb, package-rpm, package-arch, installer-script]
+    if: ${{ !cancelled() && needs.prepare.result == 'success' }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -323,6 +366,7 @@ jobs:
             -name 'PKGBUILD' -o \
             -name 'install.sh' \
           \) -exec cp {} release/ \;
+          echo "Release assets:"
           ls -lh release/
 
       - name: Generate checksums
