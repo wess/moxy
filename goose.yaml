@@ -1,0 +1,14 @@
+project:
+  name: "moxy"
+  version: "0.1.0"
+  description: ""
+  author: ""
+  license: "MIT"
+
+build:
+  cc: "cc"
+  cflags: "-Wall -Wextra -std=c11"
+  includes:
+    - "src"
+
+dependencies:
