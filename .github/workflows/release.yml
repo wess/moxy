@@ -1,0 +1,340 @@
+name: Release
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - VERSION
+
+permissions:
+  contents: write
+
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: version
+        run: echo "version=$(tr -d '[:space:]' < VERSION)" >> "$GITHUB_OUTPUT"
+
+  build:
+    needs: prepare
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: linux-amd64
+            cc: gcc
+            cflags: "-O2"
+          - os: ubuntu-latest
+            target: linux-arm64
+            cc: aarch64-linux-gnu-gcc
+            cflags: "-O2"
+            packages: gcc-aarch64-linux-gnu
+          - os: ubuntu-latest
+            target: linux-amd64-static
+            cc: musl-gcc
+            cflags: "-O2 -static"
+            packages: musl-tools
+          - os: macos-13
+            target: darwin-amd64
+            cc: cc
+            cflags: "-O2"
+          - os: macos-14
+            target: darwin-arm64
+            cc: cc
+            cflags: "-O2"
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install cross-compiler
+        if: matrix.packages
+        run: sudo apt-get update && sudo apt-get install -y ${{ matrix.packages }}
+
+      - name: Build
+        run: |
+          ${{ matrix.cc }} -Wall -Wextra -std=c11 ${{ matrix.cflags }} -Isrc src/*.c -o moxy
+          chmod +x moxy
+          ./moxy --help 2>&1 || true
+
+      - name: Package
+        env:
+          VERSION: ${{ needs.prepare.outputs.version }}
+          TARGET: ${{ matrix.target }}
+        run: |
+          mkdir -p dist
+          tar czf "dist/moxy-${VERSION}-${TARGET}.tar.gz" moxy
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: moxy-${{ matrix.target }}
+          path: dist/
+
+  package-deb:
+    needs: [prepare, build]
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include:
+          - target: linux-amd64
+            arch: amd64
+          - target: linux-arm64
+            arch: arm64
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: moxy-${{ matrix.target }}
+          path: dist/
+
+      - name: Build .deb
+        env:
+          VERSION: ${{ needs.prepare.outputs.version }}
+          ARCH: ${{ matrix.arch }}
+          TARGET: ${{ matrix.target }}
+        run: |
+          PKG="moxy_${VERSION}_${ARCH}"
+          mkdir -p "${PKG}/DEBIAN" "${PKG}/usr/bin"
+          tar xzf "dist/moxy-${VERSION}-${TARGET}.tar.gz" -C "${PKG}/usr/bin/"
+          chmod 755 "${PKG}/usr/bin/moxy"
+
+          cat > "${PKG}/DEBIAN/control" <<EOF
+          Package: moxy
+          Version: ${VERSION}
+          Section: devel
+          Priority: optional
+          Architecture: ${ARCH}
+          Maintainer: Wess Cope
+          Homepage: https://github.com/wess/moxy
+          Description: Moxy programming language transpiler
+           Moxy is a C-superset language with modern conveniences like string types,
+           auto-format print, tagged enums with match, Result types, generic lists,
+           and maps. Compiles .mxy source files to portable C11.
+          EOF
+
+          sed -i 's/^          //' "${PKG}/DEBIAN/control"
+          dpkg-deb --build --root-owner-group "${PKG}"
+          mv "${PKG}.deb" dist/
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: moxy-deb-${{ matrix.arch }}
+          path: dist/*.deb
+
+  package-rpm:
+    needs: [prepare, build]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: moxy-linux-amd64
+          path: dist/
+
+      - name: Install rpmbuild
+        run: sudo apt-get update && sudo apt-get install -y rpm
+
+      - name: Build .rpm
+        env:
+          VERSION: ${{ needs.prepare.outputs.version }}
+        run: |
+          mkdir -p rpmbuild/{BUILD,RPMS,SOURCES,SPECS,SRPMS}
+          tar xzf "dist/moxy-${VERSION}-linux-amd64.tar.gz"
+          cp moxy rpmbuild/SOURCES/
+
+          cat > rpmbuild/SPECS/moxy.spec <<'SPEC'
+          Name:           moxy
+          Version:        %{_moxy_version}
+          Release:        1%{?dist}
+          Summary:        Moxy programming language transpiler
+          License:        MIT
+          URL:            https://github.com/wess/moxy
+
+          %description
+          Moxy is a C-superset language with modern conveniences like string types,
+          auto-format print, tagged enums with match, Result types, generic lists,
+          and maps. Compiles .mxy source files to portable C11.
+
+          %install
+          mkdir -p %{buildroot}%{_bindir}
+          install -m 755 %{_sourcedir}/moxy %{buildroot}%{_bindir}/moxy
+
+          %files
+          %{_bindir}/moxy
+          SPEC
+
+          sed -i 's/^          //' rpmbuild/SPECS/moxy.spec
+          rpmbuild \
+            --define "_topdir $(pwd)/rpmbuild" \
+            --define "_moxy_version ${VERSION}" \
+            -bb rpmbuild/SPECS/moxy.spec
+
+          find rpmbuild/RPMS -name '*.rpm' -exec cp {} dist/ \;
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: moxy-rpm
+          path: dist/*.rpm
+
+  package-arch:
+    needs: prepare
+    runs-on: ubuntu-latest
+    steps:
+      - name: Generate PKGBUILD
+        env:
+          VERSION: ${{ needs.prepare.outputs.version }}
+        run: |
+          mkdir -p dist
+
+          cat > dist/PKGBUILD <<'EOF'
+          # Maintainer: Wess Cope
+          pkgname=moxy
+          pkgver=_VERSION_
+          pkgrel=1
+          pkgdesc="Moxy programming language transpiler"
+          arch=('x86_64' 'aarch64')
+          url="https://github.com/wess/moxy"
+          license=('MIT')
+          depends=('glibc')
+          makedepends=('gcc')
+          source=("${url}/archive/v${pkgver}.tar.gz")
+          sha256sums=('SKIP')
+
+          build() {
+            cd "${pkgname}-${pkgver}"
+            cc -Wall -Wextra -std=c11 -O2 -Isrc src/*.c -o moxy
+          }
+
+          package() {
+            cd "${pkgname}-${pkgver}"
+            install -Dm755 moxy "${pkgdir}/usr/bin/moxy"
+          }
+          EOF
+
+          sed -i "s/_VERSION_/${VERSION}/" dist/PKGBUILD
+          sed -i 's/^          //' dist/PKGBUILD
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: moxy-pkgbuild
+          path: dist/PKGBUILD
+
+  installer-script:
+    needs: prepare
+    runs-on: ubuntu-latest
+    steps:
+      - name: Generate install script
+        env:
+          VERSION: ${{ needs.prepare.outputs.version }}
+        run: |
+          mkdir -p dist
+
+          cat > dist/install.sh <<'SCRIPT'
+          #!/bin/sh
+          set -eu
+
+          REPO="wess/moxy"
+          VERSION="_VERSION_"
+          INSTALL_DIR="${INSTALL_DIR:-/usr/local/bin}"
+
+          detect_platform() {
+            OS="$(uname -s | tr '[:upper:]' '[:lower:]')"
+            ARCH="$(uname -m)"
+
+            case "${OS}" in
+              linux)  OS="linux" ;;
+              darwin) OS="darwin" ;;
+              *)      echo "Unsupported OS: ${OS}" >&2; exit 1 ;;
+            esac
+
+            case "${ARCH}" in
+              x86_64|amd64)   ARCH="amd64" ;;
+              aarch64|arm64)  ARCH="arm64" ;;
+              *)              echo "Unsupported architecture: ${ARCH}" >&2; exit 1 ;;
+            esac
+
+            # prefer static build on linux
+            SUFFIX=""
+            if [ "${OS}" = "linux" ] && [ "${ARCH}" = "amd64" ]; then
+              SUFFIX="-static"
+            fi
+
+            echo "${OS}-${ARCH}${SUFFIX}"
+          }
+
+          PLATFORM="$(detect_platform)"
+          TARBALL="moxy-${VERSION}-${PLATFORM}.tar.gz"
+          URL="https://github.com/${REPO}/releases/download/v${VERSION}/${TARBALL}"
+
+          TMPDIR="$(mktemp -d)"
+          trap 'rm -rf "${TMPDIR}"' EXIT
+
+          echo "Downloading moxy v${VERSION} for ${PLATFORM}..."
+          if command -v curl >/dev/null 2>&1; then
+            curl -fsSL "${URL}" -o "${TMPDIR}/${TARBALL}"
+          elif command -v wget >/dev/null 2>&1; then
+            wget -q "${URL}" -O "${TMPDIR}/${TARBALL}"
+          else
+            echo "Error: curl or wget required" >&2
+            exit 1
+          fi
+
+          tar xzf "${TMPDIR}/${TARBALL}" -C "${TMPDIR}"
+
+          if [ -w "${INSTALL_DIR}" ]; then
+            cp "${TMPDIR}/moxy" "${INSTALL_DIR}/moxy"
+          else
+            echo "Installing to ${INSTALL_DIR} (requires sudo)..."
+            sudo cp "${TMPDIR}/moxy" "${INSTALL_DIR}/moxy"
+          fi
+
+          chmod +x "${INSTALL_DIR}/moxy"
+          echo "moxy v${VERSION} installed to ${INSTALL_DIR}/moxy"
+          SCRIPT
+
+          sed -i "s/_VERSION_/${VERSION}/g" dist/install.sh
+          chmod +x dist/install.sh
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: moxy-installer
+          path: dist/install.sh
+
+  release:
+    needs: [prepare, build, package-deb, package-rpm, package-arch, installer-script]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts/
+
+      - name: Collect release assets
+        run: |
+          mkdir -p release
+          find artifacts -type f \( \
+            -name '*.tar.gz' -o \
+            -name '*.deb' -o \
+            -name '*.rpm' -o \
+            -name 'PKGBUILD' -o \
+            -name 'install.sh' \
+          \) -exec cp {} release/ \;
+          ls -lh release/
+
+      - name: Generate checksums
+        working-directory: release
+        run: sha256sum * > checksums.txt
+
+      - name: Create release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ needs.prepare.outputs.version }}
+        run: |
+          gh release create "v${VERSION}" \
+            --title "Moxy v${VERSION}" \
+            --generate-notes \
+            release/*

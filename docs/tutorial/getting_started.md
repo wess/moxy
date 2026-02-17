@@ -2,12 +2,43 @@
 
 ## Installation
 
-### Prerequisites
+### Quick install (macOS / Linux)
 
-- A C compiler (`cc`, `gcc`, or `clang`)
-- [goose](https://github.com/wess/goose) — C build tool
+```sh
+curl -fsSL https://github.com/wess/moxy/releases/latest/download/install.sh | sh
+```
+
+This auto-detects your OS and architecture, downloads the right binary, and installs to `/usr/local/bin`. Set `INSTALL_DIR` to change the location:
+
+```sh
+INSTALL_DIR=~/.local/bin curl -fsSL https://github.com/wess/moxy/releases/latest/download/install.sh | sh
+```
+
+### Package managers
+
+**Debian / Ubuntu:**
+```sh
+curl -fsSLO https://github.com/wess/moxy/releases/latest/download/moxy_VERSION_amd64.deb
+sudo dpkg -i moxy_*.deb
+```
+
+**Fedora / RHEL:**
+```sh
+curl -fsSLO https://github.com/wess/moxy/releases/latest/download/moxy-VERSION-1.x86_64.rpm
+sudo rpm -i moxy-*.rpm
+```
+
+**Arch Linux:**
+```sh
+curl -fsSLO https://github.com/wess/moxy/releases/latest/download/PKGBUILD
+makepkg -si
+```
 
 ### Building from source
+
+Prerequisites:
+- A C compiler (`cc`, `gcc`, or `clang`)
+- [goose](https://github.com/wess/goose) — C build tool
 
 ```sh
 git clone https://github.com/wess/moxy.git
@@ -15,7 +46,7 @@ cd moxy
 goose build
 ```
 
-The transpiler binary is at `./build/debug/moxy`.
+The transpiler binary is at `moxy`.
 
 ## Your First Program
 
@@ -30,7 +61,7 @@ void main() {
 Transpile and run:
 
 ```sh
-./build/debug/moxy hello.mxy > hello.c
+moxy hello.mxy > hello.c
 cc -std=c11 -o hello hello.c
 ./hello
 ```

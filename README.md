@@ -25,23 +25,76 @@ Moxy keeps everything good about C — same types, same control flow, same menta
 
 Everything else is standard C: `if`/`else`, `for`, `while`, `return`, all arithmetic/comparison/logical operators, functions with typed parameters, recursion, global variables, and comments.
 
-## Quick Start
+## Installation
 
-### Prerequisites
-
-- A C compiler (`cc`, `gcc`, or `clang`)
-- [goose](https://github.com/wess/goose) build tool
-
-### Build the transpiler
+### Quick install (macOS / Linux)
 
 ```sh
+curl -fsSL https://github.com/wess/moxy/releases/latest/download/install.sh | sh
+```
+
+Or set a custom install directory:
+
+```sh
+INSTALL_DIR=~/.local/bin curl -fsSL https://github.com/wess/moxy/releases/latest/download/install.sh | sh
+```
+
+### Debian / Ubuntu
+
+```sh
+curl -fsSLO https://github.com/wess/moxy/releases/latest/download/moxy_VERSION_amd64.deb
+sudo dpkg -i moxy_*.deb
+```
+
+### Fedora / RHEL
+
+```sh
+curl -fsSLO https://github.com/wess/moxy/releases/latest/download/moxy-VERSION-1.x86_64.rpm
+sudo rpm -i moxy-*.rpm
+```
+
+### Arch Linux
+
+A `PKGBUILD` is included in each release for use with `makepkg`:
+
+```sh
+curl -fsSLO https://github.com/wess/moxy/releases/latest/download/PKGBUILD
+makepkg -si
+```
+
+### From source
+
+Requires a C compiler and [goose](https://github.com/wess/goose):
+
+```sh
+git clone https://github.com/wess/moxy.git
+cd moxy
 goose build
 ```
+
+The binary is at `./build/debug/moxy`.
+
+### Platform support
+
+| Platform | Architecture | Format |
+|----------|-------------|--------|
+| macOS | Intel (amd64) | tar.gz |
+| macOS | Apple Silicon (arm64) | tar.gz |
+| Linux | amd64 | tar.gz |
+| Linux | arm64 | tar.gz |
+| Linux | amd64 (static/musl) | tar.gz |
+| Debian/Ubuntu | amd64, arm64 | .deb |
+| Fedora/RHEL | x86_64 | .rpm |
+| Arch Linux | x86_64, aarch64 | PKGBUILD |
+
+All release assets include SHA-256 checksums in `checksums.txt`.
+
+## Quick Start
 
 ### Transpile and run
 
 ```sh
-./build/debug/moxy examples/features.mxy > out.c
+moxy examples/features.mxy > out.c
 cc -std=c11 -o out out.c
 ./out
 ```
