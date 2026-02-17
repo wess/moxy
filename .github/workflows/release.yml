@@ -77,13 +77,11 @@ jobs:
 
   build-macos-amd64:
     needs: prepare
-    runs-on: macos-13
+    runs-on: macos-14
     steps:
       - uses: actions/checkout@v4
       - name: Build
-        run: cc -Wall -Wextra -std=c11 -O2 -Isrc src/*.c -o moxy
-      - name: Smoke test
-        run: ./moxy 2>&1 || true
+        run: cc -Wall -Wextra -std=c11 -O2 -Isrc src/*.c -target x86_64-apple-macos12 -o moxy
       - name: Package
         run: |
           mkdir -p dist
