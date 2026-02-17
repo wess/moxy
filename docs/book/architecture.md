@@ -94,7 +94,7 @@ Two-pass code generation:
 
 ## Build System
 
-Moxy is built with [goose](https://github.com/nicebyte/goose), a Cargo-inspired C build tool. The `goose.yaml` config:
+Moxy is built with [goose](https://github.com/wess/goose), a Cargo-inspired C build tool. The `goose.yaml` config:
 
 ```yaml
 project:

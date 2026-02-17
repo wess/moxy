@@ -5,12 +5,12 @@
 ### Prerequisites
 
 - A C compiler (`cc`, `gcc`, or `clang`)
-- [goose](https://github.com/nicebyte/goose) — C build tool
+- [goose](https://github.com/wess/goose) — C build tool
 
 ### Building from source
 
 ```sh
-git clone <repo-url>
+git clone https://github.com/wess/moxy.git
 cd moxy
 goose build
 ```

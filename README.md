@@ -30,7 +30,7 @@ Everything else is standard C: `if`/`else`, `for`, `while`, `return`, all arithm
 ### Prerequisites
 
 - A C compiler (`cc`, `gcc`, or `clang`)
-- [goose](https://github.com/nicebyte/goose) build tool
+- [goose](https://github.com/wess/goose) build tool
 
 ### Build the transpiler
 
