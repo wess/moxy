@@ -1,0 +1,16 @@
+[language]
+name = "Moxy"
+grammar = "c"
+path_suffixes = ["mxy"]
+line_comments = ["// "]
+block_comment = ["/* ", " */"]
+autoclose_before = ";:.,=}])> \n\t"
+brackets = [
+  { start = "{", end = "}", close = true, newline = true },
+  { start = "[", end = "]", close = true, newline = false },
+  { start = "(", end = ")", close = true, newline = false },
+  { start = "\"", end = "\"", close = true, newline = false, not_in = ["string"] },
+  { start = "'", end = "'", close = true, newline = false, not_in = ["string"] },
+]
+word_characters = ["_"]
+tab_size = 2

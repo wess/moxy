@@ -62,6 +62,14 @@ curl -fsSLO https://github.com/wess/moxy/releases/latest/download/PKGBUILD
 makepkg -si
 ```
 
+### asdf
+
+```sh
+asdf plugin add moxy https://github.com/wess/moxy.git tools/asdf
+asdf install moxy latest
+asdf set moxy latest
+```
+
 ### From source
 
 Requires a C compiler and [goose](https://github.com/wess/goose):
@@ -368,6 +376,18 @@ Along with the `list_int` struct and helper functions. The output compiles with 
 | [API Reference](docs/api/index.md) | Internal C API for each transpiler module |
 | [Examples](examples/) | `.mxy` source files demonstrating all features |
 
+## Editor Support
+
+### Zed
+
+Copy the extension into your Zed extensions directory:
+
+```sh
+cp -r tools/editors/zed ~/.config/zed/extensions/moxy
+```
+
+Provides syntax highlighting, auto-indent, bracket matching, and comment toggling for `.mxy` files.
+
 ## Project Structure
 
 ```
@@ -378,6 +398,9 @@ src/
   parser.h/c     — recursive descent parser
   codegen.h/c    — C code generator with monomorphization
   main.c         — CLI entry point and preprocessor
+tools/
+  asdf/          — asdf version manager plugin
+  editors/zed/   — Zed editor extension
 examples/
   features.mxy   — comprehensive feature showcase
   math.mxy       — helper functions (included by features.mxy)

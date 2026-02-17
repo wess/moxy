@@ -1,0 +1,7 @@
+id = "moxy"
+name = "Moxy"
+version = "0.0.1"
+schema_version = 1
+description = "Moxy language support for Zed"
+repository = "https://github.com/wess/moxy"
+authors = ["Wess Cope"]

@@ -1,0 +1,41 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+REPO="wess/moxy"
+
+detect_platform() {
+  local os arch suffix
+
+  os="$(uname -s | tr '[:upper:]' '[:lower:]')"
+  arch="$(uname -m)"
+
+  case "${os}" in
+    linux)  os="linux" ;;
+    darwin) os="darwin" ;;
+    *)      echo "Unsupported OS: ${os}" >&2; exit 1 ;;
+  esac
+
+  case "${arch}" in
+    x86_64|amd64)   arch="amd64" ;;
+    aarch64|arm64)   arch="arm64" ;;
+    *)               echo "Unsupported architecture: ${arch}" >&2; exit 1 ;;
+  esac
+
+  suffix=""
+  if [ "${os}" = "linux" ] && [ "${arch}" = "amd64" ]; then
+    suffix="-static"
+  fi
+
+  echo "${os}-${arch}${suffix}"
+}
+
+platform="$(detect_platform)"
+tarball="moxy-${ASDF_INSTALL_VERSION}-${platform}.tar.gz"
+url="https://github.com/${REPO}/releases/download/v${ASDF_INSTALL_VERSION}/${tarball}"
+
+mkdir -p "${ASDF_DOWNLOAD_PATH}"
+
+echo "Downloading moxy v${ASDF_INSTALL_VERSION} for ${platform}..."
+curl -fsSL "${url}" -o "${ASDF_DOWNLOAD_PATH}/${tarball}"
+tar xzf "${ASDF_DOWNLOAD_PATH}/${tarball}" -C "${ASDF_DOWNLOAD_PATH}"
+rm -f "${ASDF_DOWNLOAD_PATH}/${tarball}"

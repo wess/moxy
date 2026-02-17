@@ -34,6 +34,13 @@ curl -fsSLO https://github.com/wess/moxy/releases/latest/download/PKGBUILD
 makepkg -si
 ```
 
+**asdf:**
+```sh
+asdf plugin add moxy https://github.com/wess/moxy.git tools/asdf
+asdf install moxy latest
+asdf set moxy latest
+```
+
 ### Building from source
 
 Prerequisites:
@@ -354,6 +361,18 @@ printf("%d\n", nums.data[0]);
 ```
 
 Along with the `list_int` struct and helper functions. The generated C is clean, readable, and compiles with any C11 compiler.
+
+## Editor Setup
+
+### Zed
+
+Copy the bundled extension into your Zed extensions directory:
+
+```sh
+cp -r tools/editors/zed ~/.config/zed/extensions/moxy
+```
+
+This gives you syntax highlighting, auto-indent, bracket matching, and comment toggling for `.mxy` files.
 
 ## Next Steps
 
