@@ -22,6 +22,9 @@ static int ninsts;
 static char user_includes[64][256];
 static int nuser_includes;
 
+static char user_directives[128][512];
+static int nuser_directives;
+
 static void emit(const char *fmt, ...) {
     va_list ap;
     va_start(ap, fmt);
@@ -66,6 +69,13 @@ void codegen_add_include(const char *line) {
     strncpy(user_includes[nuser_includes], line, 255);
     user_includes[nuser_includes][255] = '\0';
     nuser_includes++;
+}
+
+void codegen_add_directive(const char *line) {
+    if (nuser_directives >= 128) return;
+    strncpy(user_directives[nuser_directives], line, 511);
+    user_directives[nuser_directives][511] = '\0';
+    nuser_directives++;
 }
 
 /* ---- type helpers ---- */
@@ -154,6 +164,26 @@ static void c_type_buf(const char *mxy, char *buf) {
         snprintf(buf, 128, "map_%s_%s", mk, mv);
         return;
     }
+    /* handle "const string" → "const char*" and other qualified string types */
+    if (strstr(mxy, "string")) {
+        char tmp[128];
+        strcpy(tmp, mxy);
+        char *sp = strstr(tmp, "string");
+        if (sp) {
+            char result[128] = {0};
+            int prefix_len = (int)(sp - tmp);
+            memcpy(result, tmp, prefix_len);
+            strcat(result, "const char*");
+            strcat(result, sp + 6);
+            strcpy(buf, result);
+            return;
+        }
+    }
+    /* types containing * or spaces are already C types — pass through */
+    if (strchr(mxy, '*') || strchr(mxy, ' ')) {
+        strcpy(buf, mxy);
+        return;
+    }
     strcpy(buf, c_type_simple(mxy));
 }
 
@@ -226,6 +256,10 @@ static const char *infer_type(Node *n) {
     }
     case NODE_EXPR_PAREN: return infer_type(n->paren.inner);
     case NODE_EXPR_UNARY: return infer_type(n->unary.operand);
+    case NODE_EXPR_TERNARY: return infer_type(n->ternary.then_expr);
+    case NODE_EXPR_CAST:
+    case NODE_RAW:
+        return NULL;
     default: return NULL;
     }
 }
@@ -365,7 +399,7 @@ static void gen_expr(Node *n) {
         emit("\"%s\"", n->strlit.value);
         break;
     case NODE_EXPR_INTLIT:
-        emit("%d", n->intlit.value);
+        emit("%s", n->intlit.text);
         break;
     case NODE_EXPR_FLOATLIT:
         emit("%s", n->floatlit.value);
@@ -431,30 +465,47 @@ static void gen_expr(Node *n) {
         break;
     case NODE_EXPR_FIELD:
         gen_expr(n->field.target);
-        emit(".%s", n->field.name);
+        emit("%s%s", n->field.is_arrow ? "->" : ".", n->field.name);
         break;
-    case NODE_EXPR_INDEX:
+    case NODE_EXPR_INDEX: {
+        const char *tt = infer_type(n->index.target);
         gen_expr(n->index.target);
-        emit(".data[");
+        if (tt && is_list_type(tt))
+            emit(".data[");
+        else
+            emit("[");
         gen_expr(n->index.idx);
         emit("]");
         break;
+    }
     case NODE_EXPR_METHOD: {
-        const char *tt = NULL;
-        if (n->method.target->kind == NODE_EXPR_IDENT)
-            tt = sym_type(n->method.target->ident.name);
+        if (n->method.is_arrow) {
+            /* C arrow method call: target->name(args) */
+            gen_expr(n->method.target);
+            emit("->%s(", n->method.name);
+            for (int i = 0; i < n->method.nargs; i++) {
+                if (i > 0) emit(", ");
+                gen_expr(n->method.args[i]);
+            }
+            emit(")");
+        } else {
+            /* Moxy dot method dispatch: type_name(&target, args) */
+            const char *tt = NULL;
+            if (n->method.target->kind == NODE_EXPR_IDENT)
+                tt = sym_type(n->method.target->ident.name);
 
-        char tname[128];
-        if (tt) c_type_buf(tt, tname);
-        else strcpy(tname, "unknown");
+            char tname[128];
+            if (tt) c_type_buf(tt, tname);
+            else strcpy(tname, "unknown");
 
-        emit("%s_%s(&", tname, n->method.name);
-        gen_expr(n->method.target);
-        for (int i = 0; i < n->method.nargs; i++) {
-            emit(", ");
-            gen_expr(n->method.args[i]);
+            emit("%s_%s(&", tname, n->method.name);
+            gen_expr(n->method.target);
+            for (int i = 0; i < n->method.nargs; i++) {
+                emit(", ");
+                gen_expr(n->method.args[i]);
+            }
+            emit(")");
         }
-        emit(")");
         break;
     }
     case NODE_EXPR_CALL:
@@ -468,6 +519,20 @@ static void gen_expr(Node *n) {
     case NODE_EXPR_EMPTY:
     case NODE_EXPR_OK:
     case NODE_EXPR_ERR:
+        break;
+    case NODE_RAW:
+        emit("%s", n->raw.text);
+        break;
+    case NODE_EXPR_TERNARY:
+        gen_expr(n->ternary.cond);
+        emit(" ? ");
+        gen_expr(n->ternary.then_expr);
+        emit(" : ");
+        gen_expr(n->ternary.else_expr);
+        break;
+    case NODE_EXPR_CAST:
+        emit("(%s)", n->cast.type_text);
+        gen_expr(n->cast.operand);
         break;
     default:
         break;
@@ -731,6 +796,9 @@ static void gen_stmt(Node *n) {
         gen_expr(n->expr_stmt.expr);
         emit(";\n");
         break;
+    case NODE_RAW:
+        emitln("%s", n->raw.text);
+        break;
     default:
         break;
     }
@@ -792,9 +860,13 @@ static void gen_forward_decl(Node *n) {
     } else {
         for (int i = 0; i < n->func_decl.nparams; i++) {
             if (i > 0) emit(", ");
-            char pct[128];
-            c_type_buf(n->func_decl.params[i].type, pct);
-            emit("%s %s", pct, n->func_decl.params[i].name);
+            if (strcmp(n->func_decl.params[i].type, "...") == 0) {
+                emit("...");
+            } else {
+                char pct[128];
+                c_type_buf(n->func_decl.params[i].type, pct);
+                emit("%s %s", pct, n->func_decl.params[i].name);
+            }
         }
     }
     emit(");\n");
@@ -817,17 +889,23 @@ static void gen_func(Node *n) {
         } else {
             for (int i = 0; i < n->func_decl.nparams; i++) {
                 if (i > 0) emit(", ");
-                char pct[128];
-                c_type_buf(n->func_decl.params[i].type, pct);
-                emit("%s %s", pct, n->func_decl.params[i].name);
+                if (strcmp(n->func_decl.params[i].type, "...") == 0) {
+                    emit("...");
+                } else {
+                    char pct[128];
+                    c_type_buf(n->func_decl.params[i].type, pct);
+                    emit("%s %s", pct, n->func_decl.params[i].name);
+                }
             }
         }
         emit(") {\n");
     }
 
     /* add params to symbol table */
-    for (int i = 0; i < n->func_decl.nparams; i++)
-        sym_add(n->func_decl.params[i].name, n->func_decl.params[i].type);
+    for (int i = 0; i < n->func_decl.nparams; i++) {
+        if (strcmp(n->func_decl.params[i].type, "...") != 0)
+            sym_add(n->func_decl.params[i].name, n->func_decl.params[i].type);
+    }
 
     indent = 1;
     for (int i = 0; i < n->func_decl.nbody; i++)
@@ -931,6 +1009,10 @@ const char *codegen(Node *program) {
     }
     emit("\n");
 
+    /* preprocessor directives (#define, #ifdef, etc.) */
+    for (int i = 0; i < nuser_directives; i++)
+        emit("%s\n", user_directives[i]);
+
     /* enums first (user-defined) */
     for (int i = 0; i < program->program.ndecls; i++)
         if (program->program.decls[i]->kind == NODE_ENUM_DECL)
@@ -941,6 +1023,12 @@ const char *codegen(Node *program) {
         if (is_list_type(type_insts[i])) emit_list_type(type_insts[i]);
         else if (is_result_type(type_insts[i])) emit_result_type(type_insts[i]);
         else if (is_map_type(type_insts[i])) emit_map_type(type_insts[i]);
+    }
+
+    /* raw top-level declarations (structs, typedefs, C enums, etc.) */
+    for (int i = 0; i < program->program.ndecls; i++) {
+        if (program->program.decls[i]->kind == NODE_RAW)
+            emit("%s\n", program->program.decls[i]->raw.text);
     }
 
     /* forward declarations for functions */

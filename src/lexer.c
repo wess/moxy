@@ -19,6 +19,10 @@ static char peek2(Lexer *l) {
     return l->src[l->pos + 1];
 }
 
+static char peek3(Lexer *l) {
+    return l->src[l->pos + 2];
+}
+
 static char advance(Lexer *l) {
     char c = l->src[l->pos++];
     if (c == '\n') { l->line++; l->col = 1; }
@@ -82,6 +86,27 @@ static TokenKind keyword(const char *w) {
     if (strcmp(w, "while") == 0) return TOK_WHILE_KW;
     if (strcmp(w, "return") == 0) return TOK_RETURN_KW;
     if (strcmp(w, "null") == 0) return TOK_NULL_KW;
+    /* C keywords */
+    if (strcmp(w, "struct") == 0) return TOK_STRUCT_KW;
+    if (strcmp(w, "union") == 0) return TOK_UNION_KW;
+    if (strcmp(w, "typedef") == 0) return TOK_TYPEDEF_KW;
+    if (strcmp(w, "switch") == 0) return TOK_SWITCH_KW;
+    if (strcmp(w, "case") == 0) return TOK_CASE_KW;
+    if (strcmp(w, "default") == 0) return TOK_DEFAULT_KW;
+    if (strcmp(w, "do") == 0) return TOK_DO_KW;
+    if (strcmp(w, "break") == 0) return TOK_BREAK_KW;
+    if (strcmp(w, "continue") == 0) return TOK_CONTINUE_KW;
+    if (strcmp(w, "sizeof") == 0) return TOK_SIZEOF_KW;
+    if (strcmp(w, "static") == 0) return TOK_STATIC_KW;
+    if (strcmp(w, "const") == 0) return TOK_CONST_KW;
+    if (strcmp(w, "extern") == 0) return TOK_EXTERN_KW;
+    if (strcmp(w, "unsigned") == 0) return TOK_UNSIGNED_KW;
+    if (strcmp(w, "signed") == 0) return TOK_SIGNED_KW;
+    if (strcmp(w, "goto") == 0) return TOK_GOTO_KW;
+    if (strcmp(w, "volatile") == 0) return TOK_VOLATILE_KW;
+    if (strcmp(w, "register") == 0) return TOK_REGISTER_KW;
+    if (strcmp(w, "inline") == 0) return TOK_INLINE_KW;
+    if (strcmp(w, "NULL") == 0) return TOK_NULL_KW;
     return TOK_IDENT;
 }
 
@@ -94,41 +119,77 @@ Token lexer_next(Lexer *l) {
 
     if (c == '\0') return tok(TOK_EOF, "", line, col);
 
+    /* string literals with escape handling */
     if (c == '"') {
         advance(l);
         int start = l->pos;
-        while (peek(l) && peek(l) != '"') advance(l);
+        while (peek(l) && peek(l) != '"') {
+            if (peek(l) == '\\') advance(l); /* skip escaped char */
+            if (peek(l)) advance(l);
+        }
         int len = l->pos - start;
         char buf[256] = {0};
+        if (len > 255) len = 255;
         memcpy(buf, l->src + start, len);
-        advance(l);
+        advance(l); /* closing quote */
         return tok(TOK_STRLIT, buf, line, col);
     }
 
+    /* number literals: hex, float, suffixes */
     if (isdigit(c)) {
         int start = l->pos;
         int is_float = 0;
-        while (isdigit(peek(l))) advance(l);
-        if (peek(l) == '.' && isdigit(l->src[l->pos + 1])) {
-            is_float = 1;
-            advance(l);
+
+        /* hex prefix */
+        if (c == '0' && (peek2(l) == 'x' || peek2(l) == 'X')) {
+            advance(l); advance(l); /* consume 0x */
+            while (isxdigit(peek(l))) advance(l);
+        } else {
             while (isdigit(peek(l))) advance(l);
+            if (peek(l) == '.' && isdigit(l->src[l->pos + 1])) {
+                is_float = 1;
+                advance(l);
+                while (isdigit(peek(l))) advance(l);
+            }
+            /* exponent */
+            if (peek(l) == 'e' || peek(l) == 'E') {
+                is_float = 1;
+                advance(l);
+                if (peek(l) == '+' || peek(l) == '-') advance(l);
+                while (isdigit(peek(l))) advance(l);
+            }
         }
+
+        /* suffixes: L, U, UL, ULL, LL, f */
+        while (peek(l) == 'L' || peek(l) == 'l' ||
+               peek(l) == 'U' || peek(l) == 'u' ||
+               peek(l) == 'f' || peek(l) == 'F') {
+            if (peek(l) == 'f' || peek(l) == 'F') is_float = 1;
+            advance(l);
+        }
+
         int len = l->pos - start;
         char buf[64] = {0};
+        if (len > 63) len = 63;
         memcpy(buf, l->src + start, len);
         return tok(is_float ? TOK_FLOATLIT : TOK_INTLIT, buf, line, col);
     }
 
+    /* char literals with escape handling */
     if (c == '\'') {
         advance(l);
-        char ch = advance(l);
-        char buf[4] = {ch, '\0'};
-        if (peek(l) != '\'') {
-            fprintf(stderr, "moxy: unterminated char at %d:%d\n", line, col);
-            exit(1);
+        int start = l->pos;
+        if (peek(l) == '\\') {
+            advance(l); /* backslash */
+            advance(l); /* escaped char */
+        } else {
+            advance(l); /* single char */
         }
-        advance(l);
+        int len = l->pos - start;
+        char buf[8] = {0};
+        if (len > 7) len = 7;
+        memcpy(buf, l->src + start, len);
+        if (peek(l) == '\'') advance(l);
         return tok(TOK_CHARLIT, buf, line, col);
     }
 
@@ -137,21 +198,35 @@ Token lexer_next(Lexer *l) {
         while (isalnum(peek(l)) || peek(l) == '_') advance(l);
         int len = l->pos - start;
         char buf[256] = {0};
+        if (len > 255) len = 255;
         memcpy(buf, l->src + start, len);
         return tok(keyword(buf), buf, line, col);
     }
 
-    /* two-char tokens (check before single-char) */
+    /* three-char tokens */
     char c2 = peek2(l);
+    char c3 = peek3(l);
 
+    if (c == '<' && c2 == '<' && c3 == '=') { advance(l); advance(l); advance(l); return tok(TOK_LSHIFTEQ, "<<=", line, col); }
+    if (c == '>' && c2 == '>' && c3 == '=') { advance(l); advance(l); advance(l); return tok(TOK_RSHIFTEQ, ">>=", line, col); }
+    if (c == '.' && c2 == '.' && c3 == '.') { advance(l); advance(l); advance(l); return tok(TOK_ELLIPSIS, "...", line, col); }
+
+    /* two-char tokens */
     if (c == ':' && c2 == ':') { advance(l); advance(l); return tok(TOK_COLONCOLON, "::", line, col); }
     if (c == '=' && c2 == '>') { advance(l); advance(l); return tok(TOK_FATARROW, "=>", line, col); }
     if (c == '=' && c2 == '=') { advance(l); advance(l); return tok(TOK_EQEQ, "==", line, col); }
     if (c == '!' && c2 == '=') { advance(l); advance(l); return tok(TOK_NEQ, "!=", line, col); }
+    if (c == '<' && c2 == '<') { advance(l); advance(l); return tok(TOK_LSHIFT, "<<", line, col); }
     if (c == '<' && c2 == '=') { advance(l); advance(l); return tok(TOK_LTEQ, "<=", line, col); }
+    if (c == '>' && c2 == '>') { advance(l); advance(l); return tok(TOK_RSHIFT, ">>", line, col); }
     if (c == '>' && c2 == '=') { advance(l); advance(l); return tok(TOK_GTEQ, ">=", line, col); }
     if (c == '&' && c2 == '&') { advance(l); advance(l); return tok(TOK_AND, "&&", line, col); }
+    if (c == '&' && c2 == '=') { advance(l); advance(l); return tok(TOK_AMPEQ, "&=", line, col); }
     if (c == '|' && c2 == '|') { advance(l); advance(l); return tok(TOK_OR, "||", line, col); }
+    if (c == '|' && c2 == '=') { advance(l); advance(l); return tok(TOK_PIPEEQ, "|=", line, col); }
+    if (c == '^' && c2 == '=') { advance(l); advance(l); return tok(TOK_CARETEQ, "^=", line, col); }
+    if (c == '%' && c2 == '=') { advance(l); advance(l); return tok(TOK_PERCENTEQ, "%=", line, col); }
+    if (c == '-' && c2 == '>') { advance(l); advance(l); return tok(TOK_ARROW, "->", line, col); }
     if (c == '+' && c2 == '=') { advance(l); advance(l); return tok(TOK_PLUSEQ, "+=", line, col); }
     if (c == '-' && c2 == '=') { advance(l); advance(l); return tok(TOK_MINUSEQ, "-=", line, col); }
     if (c == '*' && c2 == '=') { advance(l); advance(l); return tok(TOK_STAREQ, "*=", line, col); }
@@ -180,8 +255,15 @@ Token lexer_next(Lexer *l) {
         case '/': return tok(TOK_SLASH, "/", line, col);
         case '%': return tok(TOK_PERCENT, "%", line, col);
         case '!': return tok(TOK_BANG, "!", line, col);
+        case ':': return tok(TOK_COLON, ":", line, col);
+        case '?': return tok(TOK_QUESTION, "?", line, col);
+        case '&': return tok(TOK_AMP, "&", line, col);
+        case '|': return tok(TOK_PIPE, "|", line, col);
+        case '^': return tok(TOK_CARET, "^", line, col);
+        case '~': return tok(TOK_TILDE, "~", line, col);
     }
 
-    fprintf(stderr, "moxy: unexpected '%c' at %d:%d\n", c, line, col);
-    exit(1);
+    /* unknown character — skip and continue instead of fatal error */
+    char unk[4] = {c, '\0'};
+    return tok(TOK_UNKNOWN, unk, line, col);
 }

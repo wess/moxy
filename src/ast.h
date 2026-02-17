@@ -34,6 +34,9 @@ typedef enum {
     NODE_EXPR_BINOP,
     NODE_EXPR_UNARY,
     NODE_EXPR_PAREN,
+    NODE_RAW,
+    NODE_EXPR_TERNARY,
+    NODE_EXPR_CAST,
 } NodeKind;
 
 typedef struct Node Node;
@@ -82,7 +85,7 @@ struct Node {
         struct { Node *stmts[256]; int nstmts; } block;
         struct { Node *target; char op[4]; Node *value; } assign;
         struct { char name[64]; } ident;
-        struct { int value; } intlit;
+        struct { int value; char text[64]; } intlit;
         struct { char value[64]; } floatlit;
         struct { char value[256]; } strlit;
         struct { char value; } charlit;
@@ -91,13 +94,16 @@ struct Node {
         struct { Node *items[64]; int nitems; } list_lit;
         struct { Node *inner; } ok_expr;
         struct { Node *inner; } err_expr;
-        struct { Node *target; char name[64]; Node *args[8]; int nargs; } method;
-        struct { Node *target; char name[64]; } field;
+        struct { Node *target; char name[64]; Node *args[8]; int nargs; int is_arrow; } method;
+        struct { Node *target; char name[64]; int is_arrow; } field;
         struct { Node *target; Node *idx; } index;
         struct { char name[64]; Node *args[16]; int nargs; } call;
         struct { char op[4]; Node *left; Node *right; } binop;
         struct { char op[4]; Node *operand; } unary;
         struct { Node *inner; } paren;
+        struct { char *text; } raw;
+        struct { Node *cond; Node *then_expr; Node *else_expr; } ternary;
+        struct { char type_text[128]; Node *operand; } cast;
     };
 };
 

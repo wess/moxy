@@ -59,6 +59,19 @@ static char *preprocess(const char *src, const char *srcpath) {
         const char *lp = p;
         while (*lp == ' ' || *lp == '\t') lp++;
 
+        if (*lp == '#' && strncmp(lp, "#include", 8) != 0) {
+            /* non-include directive: #define, #ifdef, #endif, #pragma, etc. — pass through */
+            char directive[512];
+            int dlen = linelen < 511 ? linelen : 511;
+            memcpy(directive, p, dlen);
+            directive[dlen] = '\0';
+            codegen_add_directive(directive);
+
+            p += linelen;
+            if (eol) p++;
+            continue;
+        }
+
         if (strncmp(lp, "#include", 8) == 0 && (lp[8] == ' ' || lp[8] == '\t' || lp[8] == '"' || lp[8] == '<')) {
             const char *after = lp + 8;
             while (*after == ' ' || *after == '\t') after++;

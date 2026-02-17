@@ -26,6 +26,27 @@ typedef enum {
     TOK_RETURN_KW,
     TOK_NULL_KW,
 
+    /* C keywords */
+    TOK_STRUCT_KW,
+    TOK_UNION_KW,
+    TOK_TYPEDEF_KW,
+    TOK_SWITCH_KW,
+    TOK_CASE_KW,
+    TOK_DEFAULT_KW,
+    TOK_DO_KW,
+    TOK_BREAK_KW,
+    TOK_CONTINUE_KW,
+    TOK_SIZEOF_KW,
+    TOK_STATIC_KW,
+    TOK_CONST_KW,
+    TOK_EXTERN_KW,
+    TOK_UNSIGNED_KW,
+    TOK_SIGNED_KW,
+    TOK_GOTO_KW,
+    TOK_VOLATILE_KW,
+    TOK_REGISTER_KW,
+    TOK_INLINE_KW,
+
     TOK_IDENT,
     TOK_STRLIT,
     TOK_INTLIT,
@@ -46,6 +67,8 @@ typedef enum {
     TOK_EQ,
     TOK_COLONCOLON,
     TOK_FATARROW,
+    TOK_COLON,
+    TOK_QUESTION,
 
     TOK_PLUS,
     TOK_MINUS,
@@ -66,6 +89,23 @@ typedef enum {
     TOK_PLUSPLUS,
     TOK_MINUSMINUS,
 
+    /* bitwise and pointer operators */
+    TOK_AMP,
+    TOK_PIPE,
+    TOK_CARET,
+    TOK_TILDE,
+    TOK_ARROW,
+    TOK_LSHIFT,
+    TOK_RSHIFT,
+    TOK_AMPEQ,
+    TOK_PIPEEQ,
+    TOK_CARETEQ,
+    TOK_PERCENTEQ,
+    TOK_LSHIFTEQ,
+    TOK_RSHIFTEQ,
+    TOK_ELLIPSIS,
+
+    TOK_UNKNOWN,
     TOK_EOF,
 } TokenKind;
 

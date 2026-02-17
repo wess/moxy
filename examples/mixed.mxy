@@ -1,0 +1,115 @@
+// Mixed: Moxy sugar + C features in the same file
+
+#include <stdlib.h>
+#include <string.h>
+
+#define VERSION 2
+
+// C struct alongside Moxy enum
+struct Vec2 {
+    float x;
+    float y;
+};
+
+enum Shape {
+    Circle(float radius),
+    Rect(int w, int h),
+    None
+}
+
+// Function using C pointer param + Moxy return type
+float vec2_len(struct Vec2* v) {
+    return v->x * v->x + v->y * v->y;
+}
+
+// Function using Moxy types
+int sum_list(int[] nums) {
+    int total = 0;
+    for (int i = 0; i < nums.len; i++) {
+        total += nums[i];
+    }
+    return total;
+}
+
+void main() {
+    // Moxy string + print
+    string greeting = "hello from moxy";
+    print(greeting);
+
+    // C struct usage
+    struct Vec2 pos = {3.0f, 4.0f};
+    struct Vec2* pp = &pos;
+    printf("vec2: %.1f %.1f\n", pp->x, pp->y);
+
+    // Moxy list + C pointer deref in same function
+    int[] items = [10, 20, 30];
+    items.push(40);
+    print(items.len);
+    print(items[0]);
+
+    // Moxy sum with list
+    int total = sum_list(items);
+    print(total);
+
+    // Moxy tagged enum + match
+    Shape s = Shape::Circle(3.14);
+    match s {
+        Shape::Circle(r) => print(r),
+        Shape::Rect(w) => print(w),
+        Shape::None => print("none"),
+    }
+
+    // C switch inside Moxy
+    int code = 2;
+    switch (code) {
+        case 1: printf("one\n"); break;
+        case 2: printf("two\n"); break;
+        default: printf("other\n"); break;
+    }
+
+    // C ternary
+    int val = (code > 1) ? 100 : 0;
+    printf("ternary: %d\n", val);
+
+    // C bitwise with Moxy print
+    int mask = 0xFF & 0x0F;
+    print(mask);
+
+    // C sizeof
+    printf("sizeof Vec2: %zu\n", sizeof(struct Vec2));
+
+    // C do-while
+    int countdown = 3;
+    do {
+        printf("countdown: %d\n", countdown);
+        countdown--;
+    } while (countdown > 0);
+
+    // Moxy Result type
+    Result<int> ok = Ok(42);
+    match ok {
+        Ok(v) => print(v),
+        Err(e) => print(e),
+    }
+
+    // Moxy map type
+    map[string,int] scores = {};
+    scores.set("alice", 95);
+    scores.set("bob", 87);
+    print(scores.get("alice"));
+    print(scores.has("bob"));
+
+    // C cast
+    double pi = 3.14159;
+    int rounded = (int)pi;
+    printf("cast: %d\n", rounded);
+
+    // C array + Moxy print
+    int arr[3] = {100, 200, 300};
+    printf("arr: %d %d %d\n", arr[0], arr[1], arr[2]);
+
+    // #define macro
+    printf("version: %d\n", VERSION);
+
+    print("all mixed tests passed");
+}
