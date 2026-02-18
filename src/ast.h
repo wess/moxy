@@ -40,6 +40,7 @@ typedef enum {
     NODE_EXPR_CAST,
     NODE_FOR_IN_STMT,
     NODE_EXPR_RANGE,
+    NODE_EXPR_AWAIT,
 } NodeKind;
 
 typedef struct Node Node;
@@ -112,6 +113,7 @@ struct Node {
         struct { char type_text[128]; Node *operand; } cast;
         struct { char var1[64]; char var2[64]; Node *iter; Node *body[256]; int nbody; } for_in_stmt;
         struct { Node *start; Node *end; } range;
+        struct { Node *inner; } await_expr;
     };
 };
 

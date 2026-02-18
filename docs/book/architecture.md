@@ -22,7 +22,7 @@ All other lines pass through unchanged. The result is a single preprocessed stri
 
 Converts preprocessed source text into a flat array of tokens. Handles:
 
-- Keywords: `int`, `float`, `string`, `bool`, `enum`, `match`, `if`, `else`, `for`, `while`, `return`, `Result`, `map`, `Ok`, `Err`, `true`, `false`, `null`, and type keywords (`double`, `char`, `long`, `short`, `void`)
+- Keywords: `int`, `float`, `string`, `bool`, `enum`, `match`, `if`, `else`, `for`, `while`, `return`, `Result`, `map`, `Ok`, `Err`, `true`, `false`, `null`, `Future`, `await`, and type keywords (`double`, `char`, `long`, `short`, `void`)
 - Literals: integers, floats, strings, chars
 - Operators: arithmetic, comparison, logical, assignment, increment/decrement
 - Punctuation: braces, parens, brackets, dots, commas, semicolons
@@ -46,7 +46,9 @@ Recursive descent parser that builds an AST from the token array. Key design dec
 
 Postfix operations (`.field`, `.method()`, `[index]`, `++/--`) bind tighter than binary operators.
 
-**Type parsing** handles compound types: `Result<T>`, `map[K,V]`, `T[]`, and simple type keywords. Uses backtracking to distinguish variable declarations from expressions (both can start with an identifier).
+**Type parsing** handles compound types: `Result<T>`, `Future<T>`, `map[K,V]`, `T[]`, and simple type keywords. `Future<T>` is gated behind the `--enable-async` flag. Uses backtracking to distinguish variable declarations from expressions (both can start with an identifier).
+
+**Await parsing**: `await` is parsed as a prefix unary expression that captures the next postfix expression (so `await compute(21)` captures the call). Also gated behind `--enable-async`.
 
 **Statement parsing** tries in order: `print`, `match`, `if`, `while`, `for`, `return`, variable declaration, then falls back to expression/assignment.
 
@@ -69,7 +71,7 @@ Two-pass code generation:
 **Pass 2: Emission** — generates C in this order:
 
 1. User-specified `#include` directives (deduplicated against auto-generated ones)
-2. Auto-generated `#include` directives (`stdio.h`, `stdbool.h`, and `stdlib.h`/`string.h` if needed)
+2. Auto-generated `#include` directives (`stdio.h`, `stdbool.h`, `stdlib.h`/`string.h` if needed, `pthread.h` if futures are used)
 3. User-defined enum type definitions
 4. Monomorphized generic types (list, Result, map structs + helper functions)
 5. Forward declarations for user-defined functions
@@ -83,6 +85,7 @@ Two-pass code generation:
 | `int[]` | `list_int` | `list_int_make()`, `list_int_push()` |
 | `Result<int>` | `Result_int` | Tag enum + tagged struct |
 | `map[string,int]` | `map_string_int` | `_make()`, `_set()`, `_get()`, `_has()` |
+| `Future<int>` | `Future_int` | pthread struct + args struct + thread wrapper + launcher |
 
 **Type inference**: A symbol table (`Sym syms[256]`) tracks variable names to Moxy types. This enables:
 
@@ -121,7 +124,9 @@ Goose auto-discovers `.c` files in `src/`, resolves headers, and compiles everyt
 | `parser.h` | ~9 | Parser API |
 | `parser.c` | ~721 | Recursive descent parser |
 | `codegen.h` | ~9 | Codegen API |
-| `codegen.c` | ~965 | C code generator with monomorphization |
-| `main.c` | ~171 | CLI entry point and source preprocessor |
+| `codegen.c` | ~1100 | C code generator with monomorphization |
+| `flags.h` | ~6 | Global feature flags (async) |
+| `flags.c` | ~3 | Feature flag storage |
+| `main.c` | ~200 | CLI entry point and source preprocessor |
 
 Total: ~2,272 lines of C.

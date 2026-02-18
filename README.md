@@ -22,6 +22,8 @@ Moxy keeps everything good about C — same types, same control flow, same menta
 | Dynamic arrays | `int[] nums = [1, 2, 3];` | Manual malloc + realloc |
 | Hash maps | `map[string,int] m = {};` | Manual implementation |
 | Pipe operator | `x \|> double_it() \|> add(1)` | `add(double_it(x), 1)` |
+| Async/Futures | `Future<int> f(int x) { return x*2; }` | pthread spawn + join |
+| Await | `int val = await f(21);` | pthread_join + extract |
 | File includes | `#include "math.mxy"` | N/A (textual inlining) |
 
 Everything else is standard C: `if`/`else`, `for`, `while`, `return`, all arithmetic/comparison/logical operators, functions with typed parameters, recursion, global variables, and comments.
@@ -117,7 +119,11 @@ moxy lint [file.mxy]            lint source for issues
 moxy <file.mxy>                 transpile to C on stdout
 ```
 
-`run` passes extra arguments through to the compiled program. `build` produces a binary (defaults to the source filename without `.mxy`). `test` discovers `*_test.mxy` files recursively or runs specific files you pass. `fmt` formats source files in-place (or checks with `--check`). `lint` checks for unused variables, empty blocks, and shadowed variables. Both `fmt` and `lint` discover `.mxy` files recursively when no file is given, and read settings from `moxyfmt.yaml` if present. All commands respect `CC` and `CFLAGS` environment variables.
+**Flags:**
+
+- `--enable-async` — enables `Future<T>` and `await` support (links `-lpthread`). Place before the command: `moxy --enable-async run file.mxy`
+
+`run` passes extra arguments through to the compiled program. `build` produces a binary (defaults to the source filename without `.mxy`). `test` discovers `*_test.mxy` files recursively or runs specific files you pass (async tests are auto-detected and linked with pthreads). `fmt` formats source files in-place (or checks with `--check`). `lint` checks for unused variables, empty blocks, and shadowed variables. Both `fmt` and `lint` discover `.mxy` files recursively when no file is given, and read settings from `moxyfmt.yaml` if present. All commands respect `CC` and `CFLAGS` environment variables.
 
 ### Testing
 
@@ -366,6 +372,37 @@ void main() {
 
 The pipe operator passes the left-hand value as the first argument to the right-hand function. `a |> f(b)` becomes `f(a, b)`. Pipes are left-associative, so `a |> f() |> g()` becomes `g(f(a))`.
 
+### Async / Futures
+
+Run concurrent work with `Future<T>` and `await` (requires `--enable-async`):
+
+```
+Future<int> compute(int x) {
+  return x * 2;
+}
+
+void main() {
+  int val = await compute(21);
+  print(val);    // 42
+}
+```
+
+Functions returning `Future<T>` automatically spawn a pthread. `await` joins the thread and extracts the result. Works with any type:
+
+```
+Future<string> greet(string name) {
+  return name;
+}
+
+Future<void> do_work() {
+  return;
+}
+```
+
+```sh
+moxy --enable-async run async.mxy
+```
+
 ### Includes
 
 Split code across multiple files:
@@ -444,6 +481,27 @@ Becomes:
 add(double_it(5), 3)
 ```
 
+Async functions spawn pthreads:
+
+```
+Future<int> compute(int x) { return x * 2; }
+int val = await compute(21);
+```
+
+Becomes:
+
+```c
+typedef struct { pthread_t thread; int result; int started; } Future_int;
+
+// ... args struct, thread wrapper, launcher ...
+
+Future_int _aw0 = compute(21);
+void *_aw0_ret;
+pthread_join(_aw0.thread, &_aw0_ret);
+int val = *(int *)_aw0_ret;
+free(_aw0_ret);
+```
+
 The output compiles with any C11 compiler.
 
 ## Documentation
@@ -477,18 +535,20 @@ src/
   ast.h/c        — AST node definitions
   parser.h/c     — recursive descent parser
   codegen.h/c    — C code generator with monomorphization
+  flags.h/c      — global feature flags (--enable-async)
   diag.h/c       — error and warning diagnostics
   fmt.h/c        — source formatter
   lint.h/c       — static analysis linter
   yaml.h/c       — moxyfmt.yaml config parser
   main.c         — CLI entry point and preprocessor
 tests/
-  *_test.mxy     — test suite (types, lists, maps, enums, functions, control flow)
+  *_test.mxy     — test suite (types, lists, maps, enums, functions, control flow, async)
 tools/
   asdf/          — asdf version manager plugin
   editors/zed/   — Zed editor extension
 examples/
   features.mxy   — comprehensive feature showcase
+  async.mxy      — async/futures example (requires --enable-async)
   math.mxy       — helper functions (included by features.mxy)
 docs/
   book/          — language reference and architecture

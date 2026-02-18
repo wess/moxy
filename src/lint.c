@@ -129,6 +129,9 @@ static void lint_walk_expr(Node *n) {
         lint_walk_expr(n->range.start);
         lint_walk_expr(n->range.end);
         break;
+    case NODE_EXPR_AWAIT:
+        lint_walk_expr(n->await_expr.inner);
+        break;
     default:
         break;
     }

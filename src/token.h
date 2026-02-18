@@ -26,6 +26,8 @@ typedef enum {
     TOK_RETURN_KW,
     TOK_NULL_KW,
     TOK_IN_KW,
+    TOK_FUTURE_KW,
+    TOK_AWAIT_KW,
 
     /* C keywords */
     TOK_STRUCT_KW,

@@ -323,6 +323,82 @@ match ok {
 }
 ```
 
+## Future Type
+
+Concurrent computation with `Future<T>` (requires `--enable-async`):
+
+```
+Future<int> compute(int x) {
+  return x * 2;
+}
+```
+
+Functions returning `Future<T>` spawn a pthread. The caller receives a future handle immediately.
+
+### Await
+
+The `await` keyword joins a future's thread and extracts the result:
+
+```
+int val = await compute(21);    // variable declaration
+await do_work();                // standalone statement (result discarded)
+```
+
+`await` can appear in two positions:
+
+1. **Variable declaration initializer**: `type name = await expr;`
+2. **Standalone expression statement**: `await expr;`
+
+### Type variants
+
+| Type | Thread returns | Await extracts |
+|------|---------------|----------------|
+| `Future<int>` | `malloc`'d int via `void*` | Dereference + free |
+| `Future<string>` | `const char*` cast to `void*` | Cast back (no free) |
+| `Future<void>` | `NULL` | Join only |
+
+### Matching Futures
+
+```
+Future<int> compute(int x) {
+  return x * 2;
+}
+
+Future<string> greet(string name) {
+  return name;
+}
+
+Future<void> do_work() {
+  return;
+}
+
+void main() {
+  int val = await compute(21);
+  string msg = await greet("hello");
+  await do_work();
+}
+```
+
+### Limitations
+
+- No nested await: `await f(await g())` is unsupported
+- Await only in variable declarations or standalone statements, not arbitrary expressions
+- No `Future<Result<T>>` nesting
+- No synchronization primitives beyond join
+- Every future must be awaited (no fire-and-forget)
+
+### Enabling async
+
+Pass `--enable-async` before the command:
+
+```sh
+moxy --enable-async run file.mxy
+moxy --enable-async build file.mxy
+moxy --enable-async file.mxy
+```
+
+Test files using `Future<` or `await ` are auto-detected and linked with pthreads.
+
 ## Map Type
 
 Key-value dictionaries with `map[K,V]`:
@@ -386,3 +462,6 @@ const char* name = NULL;
 | `x \|> f(y)` | `f(x, y)` |
 | `x \|> f() \|> g()` | `g(f(x))` |
 | `x \|> print()` | `printf("%d\n", x);` |
+| `Future<int> f(int x) { return x; }` | pthread args struct + thread wrapper + launcher |
+| `int v = await f(21);` | `Future_int _aw0 = f(21); pthread_join(...); int v = *(int *)_ret;` |
+| `await do_work();` | `Future_void _aw0 = do_work(); pthread_join(..., NULL);` |

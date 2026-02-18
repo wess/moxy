@@ -107,6 +107,8 @@ static TokenKind keyword(const char *w) {
     if (strcmp(w, "inline") == 0) return TOK_INLINE_KW;
     if (strcmp(w, "NULL") == 0) return TOK_NULL_KW;
     if (strcmp(w, "in") == 0) return TOK_IN_KW;
+    if (strcmp(w, "Future") == 0) return TOK_FUTURE_KW;
+    if (strcmp(w, "await") == 0) return TOK_AWAIT_KW;
     return TOK_IDENT;
 }
 

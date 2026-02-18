@@ -10,7 +10,7 @@ Defines the token types and token struct produced by the lexer.
 
 Enum of all token types recognized by the lexer.
 
-**Keywords** (23 tokens):
+**Keywords** (25 tokens):
 
 | Token | Keyword |
 |-------|---------|
@@ -37,6 +37,8 @@ Enum of all token types recognized by the lexer.
 | `TOK_TRUE_KW` | `true` |
 | `TOK_FALSE_KW` | `false` |
 | `TOK_NULL_KW` | `null` |
+| `TOK_FUTURE_KW` | `Future` |
+| `TOK_AWAIT_KW` | `await` |
 
 **Literals** (5 tokens):
 
@@ -155,7 +157,7 @@ AST node definitions using a tagged union pattern. Every node is heap-allocated.
 
 ### NodeKind
 
-Enum of all AST node types (33 kinds):
+Enum of all AST node types (34 kinds):
 
 **Declarations:**
 
@@ -203,6 +205,7 @@ Enum of all AST node types (33 kinds):
 | `NODE_EXPR_BINOP` | Binary operation (`left op right`) |
 | `NODE_EXPR_UNARY` | Unary operation (`op operand` or `operand op`) |
 | `NODE_EXPR_PAREN` | Parenthesized expression |
+| `NODE_EXPR_AWAIT` | `await` expression (unwraps `Future<T>`) |
 
 ### Supporting types
 
@@ -270,7 +273,9 @@ Parse a flat array of tokens (ending with `TOK_EOF`) into a `NODE_PROGRAM` AST n
 
 Postfix operations (`.field`, `.method()`, `[index]`, `++`, `--`) bind tighter than all binary operators.
 
-**Type parsing** handles: simple types (`int`, `string`, etc.), list types (`T[]`), result types (`Result<T>`), and map types (`map[K,V]`). Uses backtracking to distinguish variable declarations from expression statements.
+**Type parsing** handles: simple types (`int`, `string`, etc.), list types (`T[]`), result types (`Result<T>`), future types (`Future<T>`, gated behind `--enable-async`), and map types (`map[K,V]`). Uses backtracking to distinguish variable declarations from expression statements.
+
+**Await parsing**: `await` is parsed as a prefix expression that captures the next postfix expression. Gated behind `--enable-async`.
 
 ---
 
@@ -289,9 +294,9 @@ Generate a complete C source file from a `NODE_PROGRAM` AST. Returns a pointer t
 **Emission order:**
 
 1. User-specified `#include` directives (added via `codegen_add_include`)
-2. Auto-generated includes (`stdio.h`, `stdbool.h`, plus `stdlib.h`/`string.h` if generics are used)
+2. Auto-generated includes (`stdio.h`, `stdbool.h`, plus `stdlib.h`/`string.h` if generics are used, `pthread.h` if futures are used)
 3. Enum type definitions
-4. Monomorphized generic type definitions and helper functions
+4. Monomorphized generic type definitions and helper functions (lists, results, maps, futures)
 5. Forward declarations for user-defined functions
 6. Global variable definitions
 7. Function definitions
@@ -307,6 +312,20 @@ void codegen_add_include(const char *line);
 Register a raw C `#include` directive to be emitted at the top of the generated output. The `line` should be a complete directive string like `#include <stdlib.h>` or `#include "mylib.h"`. Duplicate lines are ignored. Up to 64 user includes are supported.
 
 Called by the preprocessor in `main.c` when a non-`.mxy` include is encountered.
+
+---
+
+## flags.h
+
+Global feature flags shared across the transpiler pipeline.
+
+### moxy_async_enabled
+
+```c
+extern int moxy_async_enabled;
+```
+
+When set to `1`, enables `Future<T>` type parsing, `await` expression parsing, and async code generation. Set by `main.c` when `--enable-async` is passed on the command line. Default is `0`.
 
 ---
 
@@ -332,7 +351,12 @@ The `preprocess` function (static in `main.c`) scans source text line-by-line be
 ### CLI usage
 
 ```
-moxy <file.mxy>
+moxy [--enable-async] <file.mxy>
+moxy [--enable-async] run <file.mxy> [args]
+moxy [--enable-async] build <file.mxy> [-o out]
+moxy test [files...]
+moxy fmt [file.mxy] [--check]
+moxy lint [file.mxy]
 ```
 
-Reads the `.mxy` file, preprocesses it, lexes, parses, generates C, and prints the C source to stdout. The caller is responsible for compiling the C output.
+Reads the `.mxy` file, preprocesses it, lexes, parses, generates C, and prints the C source to stdout. The `run` command also compiles and executes; `build` compiles to a binary. The `--enable-async` flag sets `moxy_async_enabled` and appends `-lpthread` to the compiler flags. The `test` command auto-detects async test files (containing `Future<` or `await `) and links pthreads automatically.

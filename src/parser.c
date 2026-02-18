@@ -1,5 +1,6 @@
 #include "parser.h"
 #include "diag.h"
+#include "flags.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -27,6 +28,7 @@ static int is_type_start(Token t) {
            t.kind == TOK_CHAR_KW || t.kind == TOK_BOOL_KW ||
            t.kind == TOK_LONG_KW || t.kind == TOK_SHORT_KW ||
            t.kind == TOK_VOID_KW || t.kind == TOK_RESULT_KW ||
+           t.kind == TOK_FUTURE_KW ||
            t.kind == TOK_MAP_KW || t.kind == TOK_IDENT ||
            t.kind == TOK_STRUCT_KW || t.kind == TOK_UNION_KW ||
            t.kind == TOK_UNSIGNED_KW || t.kind == TOK_SIGNED_KW ||
@@ -63,6 +65,25 @@ static void parse_type(char *buf) {
         eat(TOK_GT);
         char tmp[64];
         snprintf(tmp, 64, "Result<%s>", inner);
+        if (buf[0]) strcat(buf, " ");
+        strcat(buf, tmp);
+        return;
+    }
+
+    /* Future<T> */
+    if (t.kind == TOK_FUTURE_KW) {
+        if (!moxy_async_enabled) {
+            diag_error(t.line, t.col, "Future<T> requires --enable-async flag");
+            diag_hint("run with: moxy --enable-async ...");
+            diag_bail();
+        }
+        advance();
+        eat(TOK_LT);
+        char inner[64];
+        parse_type(inner);
+        eat(TOK_GT);
+        char tmp[64];
+        snprintf(tmp, 64, "Future<%s>", inner);
         if (buf[0]) strcat(buf, " ");
         strcat(buf, tmp);
         return;
@@ -164,6 +185,7 @@ static void parse_type(char *buf) {
 
 static Node *parse_expr(void);
 static Node *parse_expr_prec(int min_prec);
+static Node *parse_postfix(void);
 static Node *parse_stmt(void);
 
 static int no_space_after(TokenKind k) {
@@ -295,7 +317,7 @@ static int is_expr_start(Token t) {
            t.kind == TOK_LBRACE || t.kind == TOK_STAR ||
            t.kind == TOK_AMP || t.kind == TOK_PLUSPLUS ||
            t.kind == TOK_MINUSMINUS || t.kind == TOK_SIZEOF_KW ||
-           t.kind == TOK_TILDE;
+           t.kind == TOK_TILDE || t.kind == TOK_AWAIT_KW;
 }
 
 static int is_c_type_keyword(Token t) {
@@ -552,6 +574,20 @@ static Node *parse_primary(void) {
         n->col = t.col;
         strcpy(n->unary.op, t.text);
         n->unary.operand = parse_primary();
+        return n;
+    }
+
+    if (t.kind == TOK_AWAIT_KW) {
+        if (!moxy_async_enabled) {
+            diag_error(t.line, t.col, "'await' requires --enable-async flag");
+            diag_hint("run with: moxy --enable-async ...");
+            diag_bail();
+        }
+        advance();
+        Node *n = node_new(NODE_EXPR_AWAIT);
+        n->line = t.line;
+        n->col = t.col;
+        n->await_expr.inner = parse_postfix();
         return n;
     }
 

@@ -1,4 +1,5 @@
 #include "codegen.h"
+#include "flags.h"
 #include <stdio.h>
 #include <stdarg.h>
 #include <string.h>
@@ -26,6 +27,8 @@ static char user_directives[128][512];
 static int nuser_directives;
 
 static int forin_counter;
+static int async_counter;
+static int has_futures;
 
 static void emit(const char *fmt, ...) {
     va_list ap;
@@ -93,6 +96,16 @@ static int is_map_type(const char *t) {
     return strncmp(t, "map[", 4) == 0;
 }
 
+static int is_future_type(const char *t) {
+    return strncmp(t, "Future<", 7) == 0;
+}
+
+static void future_inner(const char *t, char *buf) {
+    int end = (int)strlen(t) - 1;
+    strncpy(buf, t + 7, end - 7);
+    buf[end - 7] = '\0';
+}
+
 static void list_elem(const char *t, char *buf) {
     int len = (int)strlen(t);
     strncpy(buf, t, len - 2);
@@ -153,6 +166,12 @@ static void c_type_buf(const char *mxy, char *buf) {
         map_key(mxy, k);
         map_val(mxy, v);
         snprintf(buf, 128, "map_%s_%s", k, v);
+        return;
+    }
+    if (is_future_type(mxy)) {
+        char inner[64];
+        future_inner(mxy, inner);
+        snprintf(buf, 128, "Future_%s", inner);
         return;
     }
     if (strstr(mxy, "string")) {
@@ -246,6 +265,15 @@ static const char *infer_type(Node *n) {
     case NODE_EXPR_PAREN: return infer_type(n->paren.inner);
     case NODE_EXPR_UNARY: return infer_type(n->unary.operand);
     case NODE_EXPR_TERNARY: return infer_type(n->ternary.then_expr);
+    case NODE_EXPR_AWAIT: {
+        const char *ft = infer_type(n->await_expr.inner);
+        if (ft && is_future_type(ft)) {
+            static char awbuf[64];
+            future_inner(ft, awbuf);
+            return awbuf;
+        }
+        return ft;
+    }
     case NODE_EXPR_CAST:
     case NODE_RAW:
         return NULL;
@@ -373,6 +401,16 @@ static void emit_map_type(const char *mxy_type) {
     emit("        if (%s) return true;\n", cmp);
     emit("    return false;\n");
     emit("}\n\n");
+}
+
+static void emit_future_type(const char *mxy_type) {
+    char inner[64], cinner[64], tname[128];
+    future_inner(mxy_type, inner);
+    c_type_buf(inner, cinner);
+    c_type_buf(mxy_type, tname);
+
+    emit("typedef struct { pthread_t thread; %s result; int started; } %s;\n\n",
+         strcmp(inner, "void") == 0 ? "int" : cinner, tname);
 }
 
 static void gen_expr(Node *n);
@@ -517,6 +555,9 @@ static void gen_expr(Node *n) {
         emit("(%s)", n->cast.type_text);
         gen_expr(n->cast.operand);
         break;
+    case NODE_EXPR_AWAIT:
+        gen_expr(n->await_expr.inner);
+        break;
     default:
         break;
     }
@@ -643,6 +684,40 @@ static void gen_var_decl(Node *n, int is_global) {
 
     if (n->var_decl.value->kind == NODE_EXPR_EMPTY && is_map_type(mtype)) {
         emit("%s %s = %s_make();\n", ct, n->var_decl.name, ct);
+        return;
+    }
+
+    if (n->var_decl.value->kind == NODE_EXPR_AWAIT) {
+        Node *inner = n->var_decl.value->await_expr.inner;
+        const char *ft = infer_type(inner);
+        char fut_inner[64];
+        if (ft && is_future_type(ft))
+            future_inner(ft, fut_inner);
+        else
+            strcpy(fut_inner, mtype);
+
+        char fut_ct[128];
+        if (ft) c_type_buf(ft, fut_ct);
+        else snprintf(fut_ct, 128, "Future_%s", mtype);
+
+        int idx = async_counter++;
+
+        emit("%s _aw%d = ", fut_ct, idx);
+        gen_expr(inner);
+        emit(";\n");
+
+        if (strcmp(fut_inner, "void") == 0) {
+            emitln("pthread_join(_aw%d.thread, NULL);", idx);
+        } else if (strcmp(fut_inner, "string") == 0) {
+            emitln("void *_aw%d_ret;", idx);
+            emitln("pthread_join(_aw%d.thread, &_aw%d_ret);", idx, idx);
+            emitln("%s %s = (const char *)_aw%d_ret;", ct, n->var_decl.name, idx);
+        } else {
+            emitln("void *_aw%d_ret;", idx);
+            emitln("pthread_join(_aw%d.thread, &_aw%d_ret);", idx, idx);
+            emitln("%s %s = *(%s *)_aw%d_ret;", ct, n->var_decl.name, ct, idx);
+            emitln("free(_aw%d_ret);", idx);
+        }
         return;
     }
 
@@ -864,6 +939,35 @@ static void gen_stmt(Node *n) {
         gen_assign(n);
         break;
     case NODE_EXPR_STMT:
+        if (n->expr_stmt.expr->kind == NODE_EXPR_AWAIT) {
+            Node *inner = n->expr_stmt.expr->await_expr.inner;
+            const char *ft = infer_type(inner);
+            char fut_inner[64];
+            if (ft && is_future_type(ft))
+                future_inner(ft, fut_inner);
+            else
+                strcpy(fut_inner, "void");
+
+            char fut_ct[128];
+            if (ft) c_type_buf(ft, fut_ct);
+            else strcpy(fut_ct, "Future_void");
+
+            int idx = async_counter++;
+            emit_indent();
+            emit("%s _aw%d = ", fut_ct, idx);
+            gen_expr(inner);
+            emit(";\n");
+
+            if (strcmp(fut_inner, "void") == 0) {
+                emitln("pthread_join(_aw%d.thread, NULL);", idx);
+            } else {
+                emitln("void *_aw%d_ret;", idx);
+                emitln("pthread_join(_aw%d.thread, &_aw%d_ret);", idx, idx);
+                if (strcmp(fut_inner, "string") != 0)
+                    emitln("free(_aw%d_ret);", idx);
+            }
+            break;
+        }
         emit_indent();
         gen_expr(n->expr_stmt.expr);
         emit(";\n");
@@ -940,6 +1044,11 @@ static void gen_forward_decl(Node *n) {
     int is_main = strcmp(n->func_decl.name, "main") == 0;
     if (is_main) return;
 
+    if (is_future_type(n->func_decl.ret)) {
+        sym_add(n->func_decl.name, n->func_decl.ret);
+        return;
+    }
+
     emit("%s %s(", retct, n->func_decl.name);
     emit_params(n);
     emit(");\n");
@@ -947,8 +1056,108 @@ static void gen_forward_decl(Node *n) {
     sym_add(n->func_decl.name, n->func_decl.ret);
 }
 
+static void gen_async_stmt(Node *n, const char *inner_type) {
+    if (n->kind == NODE_RETURN_STMT) {
+        if (strcmp(inner_type, "void") == 0) {
+            if (n->return_stmt.value)
+                gen_stmt(n);
+            else
+                emitln("return NULL;");
+        } else if (strcmp(inner_type, "string") == 0) {
+            emit_indent();
+            emit("return (void *)");
+            if (n->return_stmt.value)
+                gen_expr(n->return_stmt.value);
+            else
+                emit("NULL");
+            emit(";\n");
+        } else {
+            char cinner[128];
+            c_type_buf(inner_type, cinner);
+            emitln("%s *_ret = malloc(sizeof(%s));", cinner, cinner);
+            emit_indent();
+            emit("*_ret = ");
+            if (n->return_stmt.value)
+                gen_expr(n->return_stmt.value);
+            else
+                emit("0");
+            emit(";\n");
+            emitln("return (void *)_ret;");
+        }
+    } else {
+        gen_stmt(n);
+    }
+}
+
+static void gen_async_func(Node *n) {
+    const char *fname = n->func_decl.name;
+    char inner[64], cinner[128], tname[128];
+    future_inner(n->func_decl.ret, inner);
+    c_type_buf(inner, cinner);
+    c_type_buf(n->func_decl.ret, tname);
+
+    /* 1. args struct */
+    emit("typedef struct {");
+    if (n->func_decl.nparams == 0) {
+        emit(" int _dummy;");
+    } else {
+        for (int i = 0; i < n->func_decl.nparams; i++) {
+            char pct[128];
+            c_type_buf(n->func_decl.params[i].type, pct);
+            emit(" %s %s;", pct, n->func_decl.params[i].name);
+        }
+    }
+    emit(" } _%s_args;\n\n", fname);
+
+    /* 2. thread function */
+    emit("static void *_%s_thread(void *_arg) {\n", fname);
+    indent = 1;
+    emitln("_%s_args *_a = (_%s_args *)_arg;", fname, fname);
+    for (int i = 0; i < n->func_decl.nparams; i++) {
+        char pct[128];
+        c_type_buf(n->func_decl.params[i].type, pct);
+        emitln("%s %s = _a->%s;", pct, n->func_decl.params[i].name,
+               n->func_decl.params[i].name);
+        sym_add(n->func_decl.params[i].name, n->func_decl.params[i].type);
+    }
+    emitln("free(_a);");
+
+    for (int i = 0; i < n->func_decl.nbody; i++)
+        gen_async_stmt(n->func_decl.body[i], inner);
+
+    int last_is_return = (n->func_decl.nbody > 0 &&
+        n->func_decl.body[n->func_decl.nbody - 1]->kind == NODE_RETURN_STMT);
+    if (strcmp(inner, "void") == 0 && !last_is_return)
+        emitln("return NULL;");
+
+    indent = 0;
+    emit("}\n\n");
+
+    /* 3. launcher function */
+    emit("static %s %s(", tname, fname);
+    emit_params(n);
+    emit(") {\n");
+    indent = 1;
+    emitln("%s _f;", tname);
+    emitln("_%s_args *_a = malloc(sizeof(_%s_args));", fname, fname);
+    for (int i = 0; i < n->func_decl.nparams; i++)
+        emitln("_a->%s = %s;", n->func_decl.params[i].name,
+               n->func_decl.params[i].name);
+    emitln("pthread_create(&_f.thread, NULL, _%s_thread, _a);", fname);
+    emitln("_f.started = 1;");
+    emitln("return _f;");
+    indent = 0;
+    emit("}\n\n");
+}
+
 static void gen_func(Node *n) {
     int is_main = strcmp(n->func_decl.name, "main") == 0;
+
+    if (!is_main && is_future_type(n->func_decl.ret)) {
+        gen_async_func(n);
+        return;
+    }
+
     char retct[128];
     c_type_buf(n->func_decl.ret, retct);
 
@@ -986,11 +1195,14 @@ static void collect_types(Node *n) {
     case NODE_VAR_DECL:
         if (is_list_type(n->var_decl.type) ||
             is_result_type(n->var_decl.type) ||
-            is_map_type(n->var_decl.type))
+            is_map_type(n->var_decl.type) ||
+            is_future_type(n->var_decl.type))
             inst_add(n->var_decl.type);
         collect_types(n->var_decl.value);
         break;
     case NODE_FUNC_DECL:
+        if (is_future_type(n->func_decl.ret))
+            inst_add(n->func_decl.ret);
         for (int i = 0; i < n->func_decl.nbody; i++)
             collect_types(n->func_decl.body[i]);
         break;
@@ -1033,6 +1245,8 @@ const char *codegen(Node *program) {
     nenums = 0;
     ninsts = 0;
     forin_counter = 0;
+    async_counter = 0;
+    has_futures = 0;
     memset(out, 0, sizeof(out));
 
     collect_types(program);
@@ -1057,6 +1271,12 @@ const char *codegen(Node *program) {
 
     if (need_string && !has_include("#include <string.h>"))
         emit("#include <string.h>\n");
+
+    for (int i = 0; i < ninsts; i++) {
+        if (is_future_type(type_insts[i])) { has_futures = 1; break; }
+    }
+    if (has_futures && !has_include("#include <pthread.h>"))
+        emit("#include <pthread.h>\n");
     emit("\n");
 
     for (int i = 0; i < nuser_directives; i++)
@@ -1070,6 +1290,7 @@ const char *codegen(Node *program) {
         if (is_list_type(type_insts[i])) emit_list_type(type_insts[i]);
         else if (is_result_type(type_insts[i])) emit_result_type(type_insts[i]);
         else if (is_map_type(type_insts[i])) emit_map_type(type_insts[i]);
+        else if (is_future_type(type_insts[i])) emit_future_type(type_insts[i]);
     }
 
     for (int i = 0; i < program->program.ndecls; i++) {

@@ -152,6 +152,8 @@ const char *tok_name(TokenKind kind) {
     case TOK_RETURN_KW:  return "'return'";
     case TOK_NULL_KW:    return "'null'";
     case TOK_IN_KW:      return "'in'";
+    case TOK_FUTURE_KW:  return "'Future'";
+    case TOK_AWAIT_KW:   return "'await'";
     case TOK_STRUCT_KW:  return "'struct'";
     case TOK_UNION_KW:   return "'union'";
     case TOK_TYPEDEF_KW: return "'typedef'";

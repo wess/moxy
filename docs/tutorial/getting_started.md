@@ -379,6 +379,78 @@ void main() {
 }
 ```
 
+## Async / Futures
+
+Moxy supports concurrency via `Future<T>` and `await`, backed by pthreads. This feature requires the `--enable-async` flag.
+
+### Spawning a future
+
+A function returning `Future<T>` runs its body on a new thread:
+
+```
+Future<int> compute(int x) {
+  return x * 2;
+}
+
+void main() {
+  int result = await compute(21);
+  print(result);    // 42
+}
+```
+
+```sh
+moxy --enable-async run compute.mxy
+```
+
+### Void futures
+
+Use `Future<void>` for side-effecting work:
+
+```
+Future<void> do_work() {
+  // does something
+  return;
+}
+
+void main() {
+  await do_work();
+  print("done");
+}
+```
+
+### Multiple futures
+
+You can chain sequential awaits:
+
+```
+Future<int> double_it(int x) { return x * 2; }
+Future<int> add_one(int x) { return x + 1; }
+
+void main() {
+  int a = await double_it(10);
+  int b = await add_one(a);
+  print(a);    // 20
+  print(b);    // 21
+}
+```
+
+### How it works
+
+Under the hood, `Future<int> compute(int x)` generates:
+
+1. An args struct to pass parameters across the thread boundary
+2. A thread wrapper function that extracts args, runs the body, and returns the result via `void*`
+3. A launcher function that mallocs args, calls `pthread_create`, and returns the future handle
+
+`await` calls `pthread_join` and extracts the result.
+
+### Limitations
+
+- No nested await (`await f(await g())`)
+- Await only in variable declarations or standalone statements
+- No `Future<Result<T>>` nesting
+- Every future must be awaited
+
 ## What Happens Under the Hood
 
 When you write:

@@ -13,6 +13,7 @@
 #include "yaml.h"
 #include "fmt.h"
 #include "lint.h"
+#include "flags.h"
 
 static char *read_file(const char *path) {
     FILE *f = fopen(path, "r");
@@ -192,14 +193,15 @@ static int compile(const char *cpath, const char *binpath) {
     if (!cc) cc = "cc";
 
     const char *cflags = getenv("CFLAGS");
+    const char *pthread_flag = moxy_async_enabled ? " -lpthread" : "";
 
     char cmd[2048];
     if (cflags) {
-        snprintf(cmd, sizeof(cmd), "%s -std=c11 %s -o '%s' '%s'",
-                 cc, cflags, binpath, cpath);
+        snprintf(cmd, sizeof(cmd), "%s -std=c11 %s -o '%s' '%s'%s",
+                 cc, cflags, binpath, cpath, pthread_flag);
     } else {
-        snprintf(cmd, sizeof(cmd), "%s -std=c11 -o '%s' '%s'",
-                 cc, binpath, cpath);
+        snprintf(cmd, sizeof(cmd), "%s -std=c11 -o '%s' '%s'%s",
+                 cc, binpath, cpath, pthread_flag);
     }
 
     int status = system(cmd);
@@ -331,6 +333,14 @@ static double now_ms(void) {
 }
 
 static int run_one_test(const char *srcpath) {
+    char *test_src = read_file(srcpath);
+    int needs_async = (strstr(test_src, "Future<") != NULL ||
+                       strstr(test_src, "await ") != NULL);
+    free(test_src);
+
+    int saved_async = moxy_async_enabled;
+    if (needs_async) moxy_async_enabled = 1;
+
     const char *c_code = transpile(srcpath);
 
     char tmpdir[] = "/tmp/moxy_XXXXXX";
@@ -357,6 +367,8 @@ static int run_one_test(const char *srcpath) {
     int status;
     waitpid(pid, &status, 0);
     rmrf(tmpdir);
+
+    moxy_async_enabled = saved_async;
 
     if (WIFEXITED(status)) return WEXITSTATUS(status);
     return 1;
@@ -597,6 +609,21 @@ static void print_usage(void) {
 }
 
 int main(int argc, char **argv) {
+    if (argc < 2) {
+        print_usage();
+        return 1;
+    }
+
+    for (int i = 1; i < argc; i++) {
+        if (strcmp(argv[i], "--enable-async") == 0) {
+            moxy_async_enabled = 1;
+            for (int j = i; j < argc - 1; j++)
+                argv[j] = argv[j + 1];
+            argc--;
+            i--;
+        }
+    }
+
     if (argc < 2) {
         print_usage();
         return 1;
