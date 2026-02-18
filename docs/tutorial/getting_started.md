@@ -290,6 +290,78 @@ void main() {
 }
 ```
 
+## Automatic Reference Counting (ARC)
+
+By default, lists and maps are stack-allocated structs. With `--enable-arc`, they become heap-allocated objects with automatic reference counting. The compiler inserts `retain`/`release` calls at scope boundaries — your Moxy code stays the same:
+
+```
+void main() {
+  int[] nums = [1, 2, 3];
+  nums.push(4);
+  print(nums.len);     // 4
+  print(nums[0]);      // 1
+}
+```
+
+```sh
+moxy --enable-arc run arc_example.mxy
+```
+
+### Shared references
+
+When you assign one list to another, they share the same backing memory:
+
+```
+void main() {
+  int[] a = [1, 2, 3];
+  int[] b = a;          // both point to the same list
+  b.push(4);
+  print(a.len);         // 4 — a sees the change too
+}
+```
+
+### Passing to functions
+
+ARC types are passed as pointers. The compiler retains on entry and releases on exit:
+
+```
+int list_sum(int[] nums) {
+  int total = 0;
+  for (int i = 0; i < nums.len; i++) {
+    total += nums[i];
+  }
+  return total;
+}
+
+int[] make_list() {
+  int[] result = [10, 20, 30];
+  return result;    // ownership transfers to caller
+}
+
+void main() {
+  int[] a = [1, 2, 3];
+  print(list_sum(a));    // 6
+
+  int[] b = make_list();
+  print(b[1]);           // 20
+}
+```
+
+### Nested scopes
+
+ARC variables declared in if-blocks, loops, or match arms are released when that scope ends:
+
+```
+void main() {
+  int[] outer = [1, 2];
+  if (true) {
+    int[] inner = [3, 4];
+    print(inner.len);    // 2, released here
+  }
+  print(outer.len);      // 2, released at function exit
+}
+```
+
 ## Comments
 
 ```
@@ -469,7 +541,18 @@ list_int_push(&nums, 4);
 printf("%d\n", nums.data[0]);
 ```
 
-Along with the `list_int` struct and helper functions. The generated C is clean, readable, and compiles with any C11 compiler.
+Along with the `list_int` struct and helper functions.
+
+With `--enable-arc`, the same Moxy code generates ref-counted heap objects:
+
+```c
+list_int *nums = list_int_make((int[]){1, 2, 3}, 3);  // rc=1
+list_int_push(nums, 4);       // pointer, no &
+printf("%d\n", nums->data[0]); // -> not .
+list_int_release(nums);        // auto-inserted at scope exit
+```
+
+The generated C is clean, readable, and compiles with any C11 compiler.
 
 ## Editor Setup
 

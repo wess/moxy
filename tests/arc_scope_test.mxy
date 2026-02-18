@@ -1,0 +1,8 @@
+void main() {
+    int[] outer = [1, 2];
+    if (true) {
+        int[] inner = [3, 4];
+        assert(inner.len == 2);
+    }
+    assert(outer.len == 2);
+}

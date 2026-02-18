@@ -336,10 +336,15 @@ static int run_one_test(const char *srcpath) {
     char *test_src = read_file(srcpath);
     int needs_async = (strstr(test_src, "Future<") != NULL ||
                        strstr(test_src, "await ") != NULL);
+    int needs_arc = (strstr(srcpath, "arc") != NULL &&
+                     (strstr(test_src, "[]") != NULL ||
+                      strstr(test_src, "map[") != NULL));
     free(test_src);
 
     int saved_async = moxy_async_enabled;
+    int saved_arc = moxy_arc_enabled;
     if (needs_async) moxy_async_enabled = 1;
+    if (needs_arc) moxy_arc_enabled = 1;
 
     const char *c_code = transpile(srcpath);
 
@@ -369,6 +374,7 @@ static int run_one_test(const char *srcpath) {
     rmrf(tmpdir);
 
     moxy_async_enabled = saved_async;
+    moxy_arc_enabled = saved_arc;
 
     if (WIFEXITED(status)) return WEXITSTATUS(status);
     return 1;
@@ -617,6 +623,12 @@ int main(int argc, char **argv) {
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "--enable-async") == 0) {
             moxy_async_enabled = 1;
+            for (int j = i; j < argc - 1; j++)
+                argv[j] = argv[j + 1];
+            argc--;
+            i--;
+        } else if (strcmp(argv[i], "--enable-arc") == 0) {
+            moxy_arc_enabled = 1;
             for (int j = i; j < argc - 1; j++)
                 argv[j] = argv[j + 1];
             argc--;

@@ -418,6 +418,109 @@ map[string,int] ages = {};
 
 String keys use `strcmp` for comparison. Numeric keys use `==`.
 
+## Automatic Reference Counting (ARC)
+
+Lists and maps can be automatically memory-managed with `--enable-arc`. When enabled, collections become heap-allocated, reference-counted objects. The compiler inserts `retain`/`release` calls at scope boundaries — no source changes needed.
+
+### Enabling ARC
+
+Pass `--enable-arc` before the command:
+
+```sh
+moxy --enable-arc run file.mxy
+moxy --enable-arc build file.mxy
+moxy --enable-arc file.mxy
+```
+
+Test files with `arc` in the filename that use `[]` or `map[` are auto-detected.
+
+### How it works
+
+Without ARC, a list is a stack-allocated struct:
+
+```c
+list_int nums = list_int_make((int[]){1, 2, 3}, 3);
+list_int_push(&nums, 4);
+printf("%d\n", nums.len);
+```
+
+With ARC, the same Moxy code generates a heap-allocated, refcounted pointer:
+
+```c
+list_int *nums = list_int_make((int[]){1, 2, 3}, 3);  // rc=1
+list_int_push(nums, 4);       // pointer, no &
+printf("%d\n", nums->len);    // -> not .
+list_int_release(nums);        // auto-inserted at scope exit
+```
+
+### Aliasing
+
+Assigning one ARC variable to another shares the reference:
+
+```
+int[] a = [1, 2, 3];
+int[] b = a;       // retain(a), rc=2
+b.push(4);         // both a and b see the change
+```
+
+Generated C:
+
+```c
+list_int *a = list_int_make((int[]){1, 2, 3}, 3);
+list_int_retain(a);
+list_int *b = a;   // rc=2
+list_int_push(b, 4);
+list_int_release(b);  // rc=1
+list_int_release(a);  // rc=0 -> freed
+```
+
+### Scope rules
+
+ARC variables are released at the end of their enclosing scope:
+
+- **Function scope**: released before the closing brace (or before `return`)
+- **if/else blocks**: released at end of each branch
+- **for/while loops**: released at end of each iteration
+- **match arms**: released at end of each arm
+
+When returning an ARC value, ownership transfers to the caller — the returned value is not released.
+
+### Function parameters
+
+ARC parameters are retained on entry and released on exit:
+
+```
+int list_sum(int[] nums) {
+  int total = 0;
+  for (int i = 0; i < nums.len; i++) {
+    total += nums[i];
+  }
+  return total;
+}
+```
+
+### ARC struct layout
+
+```c
+typedef struct {
+    int _rc;          // reference count
+    int *data;
+    int len;
+    int cap;
+} list_int;
+```
+
+Maps follow the identical pattern with `_rc`, `entries`, `len`, `cap`.
+
+### Limitations
+
+- No weak references (no cycle breaking)
+- No nested ARC: `int[][]`, `map[K, int[]]` won't release inner ARC types
+- No thread-safe refcount (no atomics)
+- Strings stay as `const char*` (not heap-allocated)
+- No ARC for user-defined types (only built-in collections)
+- Result<ARC> cleanup only works via match or explicit scope exit
+
 ## Comments
 
 ```
@@ -465,3 +568,9 @@ const char* name = NULL;
 | `Future<int> f(int x) { return x; }` | pthread args struct + thread wrapper + launcher |
 | `int v = await f(21);` | `Future_int _aw0 = f(21); pthread_join(...); int v = *(int *)_ret;` |
 | `await do_work();` | `Future_void _aw0 = do_work(); pthread_join(..., NULL);` |
+| `int[] nums = [1,2,3];` (ARC) | `list_int *nums = list_int_make((int[]){1,2,3}, 3);` |
+| `nums.push(4);` (ARC) | `list_int_push(nums, 4);` |
+| `nums[0]` (ARC) | `nums->data[0]` |
+| `nums.len` (ARC) | `nums->len` |
+| scope exit (ARC) | `list_int_release(nums);` |
+| `int[] b = a;` (ARC) | `list_int_retain(a); list_int *b = a;` |

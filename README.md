@@ -24,6 +24,7 @@ Moxy keeps everything good about C — same types, same control flow, same menta
 | Pipe operator | `x \|> double_it() \|> add(1)` | `add(double_it(x), 1)` |
 | Async/Futures | `Future<int> f(int x) { return x*2; }` | pthread spawn + join |
 | Await | `int val = await f(21);` | pthread_join + extract |
+| ARC | `int[] nums = [1, 2, 3];` | Ref-counted heap alloc + auto release |
 | File includes | `#include "math.mxy"` | N/A (textual inlining) |
 
 Everything else is standard C: `if`/`else`, `for`, `while`, `return`, all arithmetic/comparison/logical operators, functions with typed parameters, recursion, global variables, and comments.
@@ -122,8 +123,9 @@ moxy <file.mxy>                 transpile to C on stdout
 **Flags:**
 
 - `--enable-async` — enables `Future<T>` and `await` support (links `-lpthread`). Place before the command: `moxy --enable-async run file.mxy`
+- `--enable-arc` — enables automatic reference counting for lists and maps. Heap-allocates collections with a refcount and inserts `retain`/`release` calls at scope boundaries. Place before the command: `moxy --enable-arc run file.mxy`
 
-`run` passes extra arguments through to the compiled program. `build` produces a binary (defaults to the source filename without `.mxy`). `test` discovers `*_test.mxy` files recursively or runs specific files you pass (async tests are auto-detected and linked with pthreads). `fmt` formats source files in-place (or checks with `--check`). `lint` checks for unused variables, empty blocks, and shadowed variables. Both `fmt` and `lint` discover `.mxy` files recursively when no file is given, and read settings from `moxyfmt.yaml` if present. All commands respect `CC` and `CFLAGS` environment variables.
+`run` passes extra arguments through to the compiled program. `build` produces a binary (defaults to the source filename without `.mxy`). `test` discovers `*_test.mxy` files recursively or runs specific files you pass (async tests are auto-detected and linked with pthreads; ARC tests with `arc` in the filename are auto-detected). `fmt` formats source files in-place (or checks with `--check`). `lint` checks for unused variables, empty blocks, and shadowed variables. Both `fmt` and `lint` discover `.mxy` files recursively when no file is given, and read settings from `moxyfmt.yaml` if present. All commands respect `CC` and `CFLAGS` environment variables.
 
 ### Testing
 
@@ -403,6 +405,28 @@ Future<void> do_work() {
 moxy --enable-async run async.mxy
 ```
 
+### Automatic Reference Counting (ARC)
+
+With `--enable-arc`, lists and maps become heap-allocated, reference-counted objects. The compiler inserts `retain`/`release` calls at scope boundaries and assignments. When the refcount hits zero, the object is freed. Your Moxy source code stays the same:
+
+```
+void main() {
+  int[] nums = [1, 2, 3];
+  nums.push(4);
+  print(nums.len);    // 4
+
+  int[] alias = nums;  // rc=2, shared reference
+  alias.push(5);
+  print(nums.len);     // 5 (same object)
+}
+```
+
+```sh
+moxy --enable-arc run arc.mxy
+```
+
+ARC-managed types are passed as pointers and automatically retained/released when entering and leaving functions, if-blocks, loops, and match arms. Returning an ARC value transfers ownership — the returned object is not released.
+
 ### Includes
 
 Split code across multiple files:
@@ -481,6 +505,23 @@ Becomes:
 add(double_it(5), 3)
 ```
 
+With `--enable-arc`, the same list code generates ref-counted heap objects:
+
+```
+int[] nums = [1, 2, 3];
+nums.push(4);
+print(nums[0]);
+```
+
+Becomes:
+
+```c
+list_int *nums = list_int_make((int[]){1, 2, 3}, 3);  // rc=1
+list_int_push(nums, 4);       // pointer, no &
+printf("%d\n", nums->data[0]); // -> not .
+list_int_release(nums);        // auto-inserted at scope exit
+```
+
 Async functions spawn pthreads:
 
 ```
@@ -535,20 +576,21 @@ src/
   ast.h/c        — AST node definitions
   parser.h/c     — recursive descent parser
   codegen.h/c    — C code generator with monomorphization
-  flags.h/c      — global feature flags (--enable-async)
+  flags.h/c      — global feature flags (--enable-async, --enable-arc)
   diag.h/c       — error and warning diagnostics
   fmt.h/c        — source formatter
   lint.h/c       — static analysis linter
   yaml.h/c       — moxyfmt.yaml config parser
   main.c         — CLI entry point and preprocessor
 tests/
-  *_test.mxy     — test suite (types, lists, maps, enums, functions, control flow, async)
+  *_test.mxy     — test suite (types, lists, maps, enums, functions, control flow, async, arc)
 tools/
   asdf/          — asdf version manager plugin
   editors/zed/   — Zed editor extension
 examples/
   features.mxy   — comprehensive feature showcase
   async.mxy      — async/futures example (requires --enable-async)
+  arc.mxy        — ARC example (requires --enable-arc)
   math.mxy       — helper functions (included by features.mxy)
 docs/
   book/          — language reference and architecture

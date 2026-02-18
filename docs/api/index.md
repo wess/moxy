@@ -327,6 +327,14 @@ extern int moxy_async_enabled;
 
 When set to `1`, enables `Future<T>` type parsing, `await` expression parsing, and async code generation. Set by `main.c` when `--enable-async` is passed on the command line. Default is `0`.
 
+### moxy_arc_enabled
+
+```c
+extern int moxy_arc_enabled;
+```
+
+When set to `1`, enables automatic reference counting for lists and maps. Collections become heap-allocated pointer types with `_rc` field, `_retain()`, and `_release()` helpers. Codegen inserts retain/release calls at scope boundaries, assignments, and function entry/exit. Set by `main.c` when `--enable-arc` is passed on the command line. Default is `0`.
+
 ---
 
 ## main.c
@@ -351,12 +359,12 @@ The `preprocess` function (static in `main.c`) scans source text line-by-line be
 ### CLI usage
 
 ```
-moxy [--enable-async] <file.mxy>
-moxy [--enable-async] run <file.mxy> [args]
-moxy [--enable-async] build <file.mxy> [-o out]
+moxy [--enable-async] [--enable-arc] <file.mxy>
+moxy [--enable-async] [--enable-arc] run <file.mxy> [args]
+moxy [--enable-async] [--enable-arc] build <file.mxy> [-o out]
 moxy test [files...]
 moxy fmt [file.mxy] [--check]
 moxy lint [file.mxy]
 ```
 
-Reads the `.mxy` file, preprocesses it, lexes, parses, generates C, and prints the C source to stdout. The `run` command also compiles and executes; `build` compiles to a binary. The `--enable-async` flag sets `moxy_async_enabled` and appends `-lpthread` to the compiler flags. The `test` command auto-detects async test files (containing `Future<` or `await `) and links pthreads automatically.
+Reads the `.mxy` file, preprocesses it, lexes, parses, generates C, and prints the C source to stdout. The `run` command also compiles and executes; `build` compiles to a binary. The `--enable-async` flag sets `moxy_async_enabled` and appends `-lpthread` to the compiler flags. The `--enable-arc` flag sets `moxy_arc_enabled` for reference-counted collections. The `test` command auto-detects async test files (containing `Future<` or `await `) and links pthreads automatically. ARC tests (filename containing `arc` with `[]` or `map[` in source) are also auto-detected.

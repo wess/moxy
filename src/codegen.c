@@ -30,6 +30,11 @@ static int forin_counter;
 static int async_counter;
 static int has_futures;
 
+typedef struct { char name[64]; char type[64]; } ArcVar;
+typedef struct { ArcVar vars[32]; int nvars; } ArcScope;
+static ArcScope arc_scopes[16];
+static int arc_depth;
+
 static void emit(const char *fmt, ...) {
     va_list ap;
     va_start(ap, fmt);
@@ -208,6 +213,53 @@ static const char *fmt_for_type(const char *t) {
     return "%d";
 }
 
+static int is_arc_type(const char *t) {
+    return moxy_arc_enabled && (is_list_type(t) || is_map_type(t));
+}
+
+static void arc_push_scope(void) {
+    if (arc_depth < 16) {
+        arc_scopes[arc_depth].nvars = 0;
+        arc_depth++;
+    }
+}
+
+static void arc_register_var(const char *name, const char *type) {
+    if (arc_depth <= 0) return;
+    ArcScope *s = &arc_scopes[arc_depth - 1];
+    if (s->nvars < 32) {
+        strncpy(s->vars[s->nvars].name, name, 63);
+        s->vars[s->nvars].name[63] = '\0';
+        strncpy(s->vars[s->nvars].type, type, 63);
+        s->vars[s->nvars].type[63] = '\0';
+        s->nvars++;
+    }
+}
+
+static void arc_emit_release(const char *name, const char *type) {
+    char tname[128];
+    c_type_buf(type, tname);
+    emitln("%s_release(%s);", tname, name);
+}
+
+static void arc_pop_scope(void) {
+    if (arc_depth <= 0) return;
+    arc_depth--;
+    ArcScope *s = &arc_scopes[arc_depth];
+    for (int i = s->nvars - 1; i >= 0; i--)
+        arc_emit_release(s->vars[i].name, s->vars[i].type);
+}
+
+static void arc_emit_cleanup_all(const char *exclude) {
+    for (int d = arc_depth - 1; d >= 0; d--) {
+        ArcScope *s = &arc_scopes[d];
+        for (int i = s->nvars - 1; i >= 0; i--) {
+            if (exclude && strcmp(s->vars[i].name, exclude) == 0) continue;
+            arc_emit_release(s->vars[i].name, s->vars[i].type);
+        }
+    }
+}
+
 static const char *infer_type(Node *n);
 
 static const char *fmt_for(Node *expr) {
@@ -311,28 +363,60 @@ static void emit_list_type(const char *mxy_type) {
     c_type_buf(elem, celem);
     c_type_buf(mxy_type, tname);
 
-    emit("typedef struct {\n");
-    emit("    %s *data;\n", celem);
-    emit("    int len;\n");
-    emit("    int cap;\n");
-    emit("} %s;\n\n", tname);
+    if (moxy_arc_enabled) {
+        emit("typedef struct {\n");
+        emit("    int _rc;\n");
+        emit("    %s *data;\n", celem);
+        emit("    int len;\n");
+        emit("    int cap;\n");
+        emit("} %s;\n\n", tname);
 
-    emit("static %s %s_make(%s *init, int n) {\n", tname, tname, celem);
-    emit("    %s l;\n", tname);
-    emit("    l.cap = n < 8 ? 8 : n;\n");
-    emit("    l.data = (%s*)malloc(l.cap * sizeof(%s));\n", celem, celem);
-    emit("    l.len = n;\n");
-    emit("    if (n > 0) memcpy(l.data, init, n * sizeof(%s));\n", celem);
-    emit("    return l;\n");
-    emit("}\n\n");
+        emit("static %s *%s_make(%s *init, int n) {\n", tname, tname, celem);
+        emit("    %s *l = (%s *)malloc(sizeof(%s));\n", tname, tname, tname);
+        emit("    l->_rc = 1;\n");
+        emit("    l->cap = n < 8 ? 8 : n;\n");
+        emit("    l->data = (%s*)malloc(l->cap * sizeof(%s));\n", celem, celem);
+        emit("    l->len = n;\n");
+        emit("    if (n > 0) memcpy(l->data, init, n * sizeof(%s));\n", celem);
+        emit("    return l;\n");
+        emit("}\n\n");
 
-    emit("static void %s_push(%s *l, %s val) {\n", tname, tname, celem);
-    emit("    if (l->len >= l->cap) {\n");
-    emit("        l->cap = l->cap < 8 ? 8 : l->cap * 2;\n");
-    emit("        l->data = (%s*)realloc(l->data, l->cap * sizeof(%s));\n", celem, celem);
-    emit("    }\n");
-    emit("    l->data[l->len++] = val;\n");
-    emit("}\n\n");
+        emit("static void %s_push(%s *l, %s val) {\n", tname, tname, celem);
+        emit("    if (l->len >= l->cap) {\n");
+        emit("        l->cap = l->cap < 8 ? 8 : l->cap * 2;\n");
+        emit("        l->data = (%s*)realloc(l->data, l->cap * sizeof(%s));\n", celem, celem);
+        emit("    }\n");
+        emit("    l->data[l->len++] = val;\n");
+        emit("}\n\n");
+
+        emit("static void %s_retain(%s *l) { if (l) l->_rc++; }\n", tname, tname);
+        emit("static void %s_release(%s *l) {\n", tname, tname);
+        emit("    if (l && --l->_rc == 0) { free(l->data); free(l); }\n");
+        emit("}\n\n");
+    } else {
+        emit("typedef struct {\n");
+        emit("    %s *data;\n", celem);
+        emit("    int len;\n");
+        emit("    int cap;\n");
+        emit("} %s;\n\n", tname);
+
+        emit("static %s %s_make(%s *init, int n) {\n", tname, tname, celem);
+        emit("    %s l;\n", tname);
+        emit("    l.cap = n < 8 ? 8 : n;\n");
+        emit("    l.data = (%s*)malloc(l.cap * sizeof(%s));\n", celem, celem);
+        emit("    l.len = n;\n");
+        emit("    if (n > 0) memcpy(l.data, init, n * sizeof(%s));\n", celem);
+        emit("    return l;\n");
+        emit("}\n\n");
+
+        emit("static void %s_push(%s *l, %s val) {\n", tname, tname, celem);
+        emit("    if (l->len >= l->cap) {\n");
+        emit("        l->cap = l->cap < 8 ? 8 : l->cap * 2;\n");
+        emit("        l->data = (%s*)realloc(l->data, l->cap * sizeof(%s));\n", celem, celem);
+        emit("    }\n");
+        emit("    l->data[l->len++] = val;\n");
+        emit("}\n\n");
+    }
 }
 
 static void emit_result_type(const char *mxy_type) {
@@ -341,14 +425,25 @@ static void emit_result_type(const char *mxy_type) {
     c_type_buf(inner, cinner);
     c_type_buf(mxy_type, tname);
 
+    int inner_arc = is_arc_type(inner);
+
     emit("typedef enum { %s_Ok, %s_Err } %s_Tag;\n", tname, tname, tname);
     emit("typedef struct {\n");
     emit("    %s_Tag tag;\n", tname);
     emit("    union {\n");
-    emit("        %s ok;\n", cinner);
+    if (inner_arc)
+        emit("        %s *ok;\n", cinner);
+    else
+        emit("        %s ok;\n", cinner);
     emit("        const char* err;\n");
     emit("    };\n");
     emit("} %s;\n\n", tname);
+
+    if (inner_arc) {
+        emit("static void %s_cleanup(%s *r) {\n", tname, tname);
+        emit("    if (r->tag == %s_Ok && r->ok) %s_release(r->ok);\n", tname, cinner);
+        emit("}\n\n");
+    }
 }
 
 static void emit_map_type(const char *mxy_type) {
@@ -361,46 +456,96 @@ static void emit_map_type(const char *mxy_type) {
 
     int key_is_str = (strcmp(k, "string") == 0);
 
-    emit("typedef struct {\n");
-    emit("    struct { %s key; %s val; } *entries;\n", ck, cv);
-    emit("    int len;\n");
-    emit("    int cap;\n");
-    emit("} %s;\n\n", tname);
+    if (moxy_arc_enabled) {
+        emit("typedef struct {\n");
+        emit("    int _rc;\n");
+        emit("    struct { %s key; %s val; } *entries;\n", ck, cv);
+        emit("    int len;\n");
+        emit("    int cap;\n");
+        emit("} %s;\n\n", tname);
 
-    emit("static %s %s_make(void) {\n", tname, tname);
-    emit("    %s m;\n", tname);
-    emit("    m.cap = 8;\n");
-    emit("    m.entries = malloc(m.cap * sizeof(*m.entries));\n");
-    emit("    m.len = 0;\n");
-    emit("    return m;\n");
-    emit("}\n\n");
+        emit("static %s *%s_make(void) {\n", tname, tname);
+        emit("    %s *m = (%s *)malloc(sizeof(%s));\n", tname, tname, tname);
+        emit("    m->_rc = 1;\n");
+        emit("    m->cap = 8;\n");
+        emit("    m->entries = malloc(m->cap * sizeof(*m->entries));\n");
+        emit("    m->len = 0;\n");
+        emit("    return m;\n");
+        emit("}\n\n");
 
-    const char *cmp = key_is_str ? "strcmp(m->entries[i].key, key) == 0" : "m->entries[i].key == key";
+        const char *cmp = key_is_str ? "strcmp(m->entries[i].key, key) == 0" : "m->entries[i].key == key";
 
-    emit("static void %s_set(%s *m, %s key, %s val) {\n", tname, tname, ck, cv);
-    emit("    for (int i = 0; i < m->len; i++) {\n");
-    emit("        if (%s) { m->entries[i].val = val; return; }\n", cmp);
-    emit("    }\n");
-    emit("    if (m->len >= m->cap) {\n");
-    emit("        m->cap *= 2;\n");
-    emit("        m->entries = realloc(m->entries, m->cap * sizeof(*m->entries));\n");
-    emit("    }\n");
-    emit("    m->entries[m->len].key = key;\n");
-    emit("    m->entries[m->len].val = val;\n");
-    emit("    m->len++;\n");
-    emit("}\n\n");
+        emit("static void %s_set(%s *m, %s key, %s val) {\n", tname, tname, ck, cv);
+        emit("    for (int i = 0; i < m->len; i++) {\n");
+        emit("        if (%s) { m->entries[i].val = val; return; }\n", cmp);
+        emit("    }\n");
+        emit("    if (m->len >= m->cap) {\n");
+        emit("        m->cap *= 2;\n");
+        emit("        m->entries = realloc(m->entries, m->cap * sizeof(*m->entries));\n");
+        emit("    }\n");
+        emit("    m->entries[m->len].key = key;\n");
+        emit("    m->entries[m->len].val = val;\n");
+        emit("    m->len++;\n");
+        emit("}\n\n");
 
-    emit("static %s %s_get(%s *m, %s key) {\n", cv, tname, tname, ck);
-    emit("    for (int i = 0; i < m->len; i++)\n");
-    emit("        if (%s) return m->entries[i].val;\n", cmp);
-    emit("    return (%s){0};\n", cv);
-    emit("}\n\n");
+        emit("static %s %s_get(%s *m, %s key) {\n", cv, tname, tname, ck);
+        emit("    for (int i = 0; i < m->len; i++)\n");
+        emit("        if (%s) return m->entries[i].val;\n", cmp);
+        emit("    return (%s){0};\n", cv);
+        emit("}\n\n");
 
-    emit("static bool %s_has(%s *m, %s key) {\n", tname, tname, ck);
-    emit("    for (int i = 0; i < m->len; i++)\n");
-    emit("        if (%s) return true;\n", cmp);
-    emit("    return false;\n");
-    emit("}\n\n");
+        emit("static bool %s_has(%s *m, %s key) {\n", tname, tname, ck);
+        emit("    for (int i = 0; i < m->len; i++)\n");
+        emit("        if (%s) return true;\n", cmp);
+        emit("    return false;\n");
+        emit("}\n\n");
+
+        emit("static void %s_retain(%s *m) { if (m) m->_rc++; }\n", tname, tname);
+        emit("static void %s_release(%s *m) {\n", tname, tname);
+        emit("    if (m && --m->_rc == 0) { free(m->entries); free(m); }\n");
+        emit("}\n\n");
+    } else {
+        emit("typedef struct {\n");
+        emit("    struct { %s key; %s val; } *entries;\n", ck, cv);
+        emit("    int len;\n");
+        emit("    int cap;\n");
+        emit("} %s;\n\n", tname);
+
+        emit("static %s %s_make(void) {\n", tname, tname);
+        emit("    %s m;\n", tname);
+        emit("    m.cap = 8;\n");
+        emit("    m.entries = malloc(m.cap * sizeof(*m.entries));\n");
+        emit("    m.len = 0;\n");
+        emit("    return m;\n");
+        emit("}\n\n");
+
+        const char *cmp = key_is_str ? "strcmp(m->entries[i].key, key) == 0" : "m->entries[i].key == key";
+
+        emit("static void %s_set(%s *m, %s key, %s val) {\n", tname, tname, ck, cv);
+        emit("    for (int i = 0; i < m->len; i++) {\n");
+        emit("        if (%s) { m->entries[i].val = val; return; }\n", cmp);
+        emit("    }\n");
+        emit("    if (m->len >= m->cap) {\n");
+        emit("        m->cap *= 2;\n");
+        emit("        m->entries = realloc(m->entries, m->cap * sizeof(*m->entries));\n");
+        emit("    }\n");
+        emit("    m->entries[m->len].key = key;\n");
+        emit("    m->entries[m->len].val = val;\n");
+        emit("    m->len++;\n");
+        emit("}\n\n");
+
+        emit("static %s %s_get(%s *m, %s key) {\n", cv, tname, tname, ck);
+        emit("    for (int i = 0; i < m->len; i++)\n");
+        emit("        if (%s) return m->entries[i].val;\n", cmp);
+        emit("    return (%s){0};\n", cv);
+        emit("}\n\n");
+
+        emit("static bool %s_has(%s *m, %s key) {\n", tname, tname, ck);
+        emit("    for (int i = 0; i < m->len; i++)\n");
+        emit("        if (%s) return true;\n", cmp);
+        emit("    return false;\n");
+        emit("}\n\n");
+    }
 }
 
 static void emit_future_type(const char *mxy_type) {
@@ -486,17 +631,29 @@ static void gen_expr(Node *n) {
     }
     case NODE_EXPR_LIST_LIT:
         break;
-    case NODE_EXPR_FIELD:
+    case NODE_EXPR_FIELD: {
+        const char *ft = infer_type(n->field.target);
+        int arc_deref = (ft && is_arc_type(ft));
         gen_expr(n->field.target);
-        emit("%s%s", n->field.is_arrow ? "->" : ".", n->field.name);
+        if (n->field.is_arrow)
+            emit("->%s", n->field.name);
+        else if (arc_deref)
+            emit("->%s", n->field.name);
+        else
+            emit(".%s", n->field.name);
         break;
+    }
     case NODE_EXPR_INDEX: {
         const char *tt = infer_type(n->index.target);
         gen_expr(n->index.target);
-        if (tt && is_list_type(tt))
-            emit(".data[");
-        else
+        if (tt && is_list_type(tt)) {
+            if (is_arc_type(tt))
+                emit("->data[");
+            else
+                emit(".data[");
+        } else {
             emit("[");
+        }
         gen_expr(n->index.idx);
         emit("]");
         break;
@@ -519,7 +676,11 @@ static void gen_expr(Node *n) {
             if (tt) c_type_buf(tt, tname);
             else strcpy(tname, "unknown");
 
-            emit("%s_%s(&", tname, n->method.name);
+            if (tt && is_arc_type(tt)) {
+                emit("%s_%s(", tname, n->method.name);
+            } else {
+                emit("%s_%s(&", tname, n->method.name);
+            }
             gen_expr(n->method.target);
             for (int i = 0; i < n->method.nargs; i++) {
                 emit(", ");
@@ -630,7 +791,9 @@ static void gen_match(Node *n) {
             }
         }
 
+        if (moxy_arc_enabled) arc_push_scope();
         gen_stmt(arm->body);
+        if (moxy_arc_enabled) arc_pop_scope();
         emitln("break;");
         indent--;
         emitln("}");
@@ -656,15 +819,29 @@ static void gen_var_decl(Node *n, int is_global) {
         char elem[64], celem[64];
         list_elem(mtype, elem);
         c_type_buf(elem, celem);
-        if (lit->list_lit.nitems > 0) {
-            emit("%s %s = %s_make((%s[]){", ct, n->var_decl.name, ct, celem);
-            for (int i = 0; i < lit->list_lit.nitems; i++) {
-                if (i > 0) emit(", ");
-                gen_expr(lit->list_lit.items[i]);
+        if (is_arc_type(mtype)) {
+            if (lit->list_lit.nitems > 0) {
+                emit("%s *%s = %s_make((%s[]){", ct, n->var_decl.name, ct, celem);
+                for (int i = 0; i < lit->list_lit.nitems; i++) {
+                    if (i > 0) emit(", ");
+                    gen_expr(lit->list_lit.items[i]);
+                }
+                emit("}, %d);\n", lit->list_lit.nitems);
+            } else {
+                emit("%s *%s = %s_make(NULL, 0);\n", ct, n->var_decl.name, ct);
             }
-            emit("}, %d);\n", lit->list_lit.nitems);
+            arc_register_var(n->var_decl.name, mtype);
         } else {
-            emit("%s %s = %s_make(NULL, 0);\n", ct, n->var_decl.name, ct);
+            if (lit->list_lit.nitems > 0) {
+                emit("%s %s = %s_make((%s[]){", ct, n->var_decl.name, ct, celem);
+                for (int i = 0; i < lit->list_lit.nitems; i++) {
+                    if (i > 0) emit(", ");
+                    gen_expr(lit->list_lit.items[i]);
+                }
+                emit("}, %d);\n", lit->list_lit.nitems);
+            } else {
+                emit("%s %s = %s_make(NULL, 0);\n", ct, n->var_decl.name, ct);
+            }
         }
         return;
     }
@@ -683,7 +860,12 @@ static void gen_var_decl(Node *n, int is_global) {
     }
 
     if (n->var_decl.value->kind == NODE_EXPR_EMPTY && is_map_type(mtype)) {
-        emit("%s %s = %s_make();\n", ct, n->var_decl.name, ct);
+        if (is_arc_type(mtype)) {
+            emit("%s *%s = %s_make();\n", ct, n->var_decl.name, ct);
+            arc_register_var(n->var_decl.name, mtype);
+        } else {
+            emit("%s %s = %s_make();\n", ct, n->var_decl.name, ct);
+        }
         return;
     }
 
@@ -721,9 +903,20 @@ static void gen_var_decl(Node *n, int is_global) {
         return;
     }
 
-    emit("%s %s = ", ct, n->var_decl.name);
-    gen_expr(n->var_decl.value);
-    emit(";\n");
+    if (is_arc_type(mtype)) {
+        if (n->var_decl.value->kind == NODE_EXPR_IDENT) {
+            emitln("%s_retain(%s);", ct, n->var_decl.value->ident.name);
+            if (!is_global) emit_indent();
+        }
+        emit("%s *%s = ", ct, n->var_decl.name);
+        gen_expr(n->var_decl.value);
+        emit(";\n");
+        arc_register_var(n->var_decl.name, mtype);
+    } else {
+        emit("%s %s = ", ct, n->var_decl.name);
+        gen_expr(n->var_decl.value);
+        emit(";\n");
+    }
 }
 
 static void gen_block(Node *block) {
@@ -737,7 +930,9 @@ static void gen_if_inner(Node *n, int is_else_if) {
     gen_expr(n->if_stmt.cond);
     emit(") {\n");
     indent++;
+    if (moxy_arc_enabled) arc_push_scope();
     gen_block(n->if_stmt.then_body);
+    if (moxy_arc_enabled) arc_pop_scope();
     indent--;
     if (n->if_stmt.else_body) {
         Node *eb = n->if_stmt.else_body;
@@ -749,7 +944,9 @@ static void gen_if_inner(Node *n, int is_else_if) {
         }
         emitln("} else {");
         indent++;
+        if (moxy_arc_enabled) arc_push_scope();
         gen_block(n->if_stmt.else_body);
+        if (moxy_arc_enabled) arc_pop_scope();
         indent--;
     }
     emitln("}");
@@ -765,8 +962,10 @@ static void gen_while(Node *n) {
     gen_expr(n->while_stmt.cond);
     emit(") {\n");
     indent++;
+    if (moxy_arc_enabled) arc_push_scope();
     for (int i = 0; i < n->while_stmt.nbody; i++)
         gen_stmt(n->while_stmt.body[i]);
+    if (moxy_arc_enabled) arc_pop_scope();
     indent--;
     emitln("}");
 }
@@ -804,8 +1003,10 @@ static void gen_for(Node *n) {
     emit(") {\n");
 
     indent++;
+    if (moxy_arc_enabled) arc_push_scope();
     for (int i = 0; i < n->for_stmt.nbody; i++)
         gen_stmt(n->for_stmt.body[i]);
+    if (moxy_arc_enabled) arc_pop_scope();
     indent--;
     emitln("}");
 }
@@ -835,6 +1036,8 @@ static void gen_for_in(Node *n) {
 
     const char *coll_type = coll_name ? sym_type(coll_name) : NULL;
 
+    const char *dot = (coll_type && is_arc_type(coll_type)) ? "->" : ".";
+
     if (coll_type && is_list_type(coll_type)) {
         char elem[64], celem[64];
         list_elem(coll_type, elem);
@@ -843,15 +1046,17 @@ static void gen_for_in(Node *n) {
         emit_indent();
         emit("for (int _fi%d = 0; _fi%d < ", idx, idx);
         gen_expr(n->for_in_stmt.iter);
-        emit(".len; _fi%d++) {\n", idx);
+        emit("%slen; _fi%d++) {\n", dot, idx);
         indent++;
+        if (moxy_arc_enabled) arc_push_scope();
         emit_indent();
         emit("%s %s = ", celem, n->for_in_stmt.var1);
         gen_expr(n->for_in_stmt.iter);
-        emit(".data[_fi%d];\n", idx);
+        emit("%sdata[_fi%d];\n", dot, idx);
         sym_add(n->for_in_stmt.var1, elem);
         for (int i = 0; i < n->for_in_stmt.nbody; i++)
             gen_stmt(n->for_in_stmt.body[i]);
+        if (moxy_arc_enabled) arc_pop_scope();
         indent--;
         emitln("}");
     } else if (coll_type && is_map_type(coll_type)) {
@@ -864,30 +1069,38 @@ static void gen_for_in(Node *n) {
         emit_indent();
         emit("for (int _fi%d = 0; _fi%d < ", idx, idx);
         gen_expr(n->for_in_stmt.iter);
-        emit(".len; _fi%d++) {\n", idx);
+        emit("%slen; _fi%d++) {\n", dot, idx);
         indent++;
+        if (moxy_arc_enabled) arc_push_scope();
         emit_indent();
         emit("%s %s = ", ck, n->for_in_stmt.var1);
         gen_expr(n->for_in_stmt.iter);
-        emit(".entries[_fi%d].key;\n", idx);
+        emit("%sentries[_fi%d].key;\n", dot, idx);
         sym_add(n->for_in_stmt.var1, k);
 
         if (n->for_in_stmt.var2[0] != '\0') {
             emit_indent();
             emit("%s %s = ", cv, n->for_in_stmt.var2);
             gen_expr(n->for_in_stmt.iter);
-            emit(".entries[_fi%d].val;\n", idx);
+            emit("%sentries[_fi%d].val;\n", dot, idx);
             sym_add(n->for_in_stmt.var2, v);
         }
 
         for (int i = 0; i < n->for_in_stmt.nbody; i++)
             gen_stmt(n->for_in_stmt.body[i]);
+        if (moxy_arc_enabled) arc_pop_scope();
         indent--;
         emitln("}");
     }
 }
 
 static void gen_return(Node *n) {
+    if (moxy_arc_enabled && arc_depth > 0) {
+        const char *exclude = NULL;
+        if (n->return_stmt.value && n->return_stmt.value->kind == NODE_EXPR_IDENT)
+            exclude = n->return_stmt.value->ident.name;
+        arc_emit_cleanup_all(exclude);
+    }
     emit_indent();
     if (n->return_stmt.value) {
         emit("return ");
@@ -899,6 +1112,23 @@ static void gen_return(Node *n) {
 }
 
 static void gen_assign(Node *n) {
+    if (strcmp(n->assign.op, "=") == 0 && n->assign.target->kind == NODE_EXPR_IDENT) {
+        const char *tt = sym_type(n->assign.target->ident.name);
+        if (tt && is_arc_type(tt)) {
+            char tname[128];
+            c_type_buf(tt, tname);
+            emitln("%s_release(%s);", tname, n->assign.target->ident.name);
+            emit_indent();
+            gen_expr(n->assign.target);
+            emit(" = ");
+            gen_expr(n->assign.value);
+            emit(";\n");
+            if (n->assign.value->kind == NODE_EXPR_IDENT) {
+                emitln("%s_retain(%s);", tname, n->assign.target->ident.name);
+            }
+            return;
+        }
+    }
     emit_indent();
     gen_expr(n->assign.target);
     emit(" %s ", n->assign.op);
@@ -1032,7 +1262,10 @@ static void emit_params(Node *n) {
             } else {
                 char pct[128];
                 c_type_buf(n->func_decl.params[i].type, pct);
-                emit("%s %s", pct, n->func_decl.params[i].name);
+                if (is_arc_type(n->func_decl.params[i].type))
+                    emit("%s *%s", pct, n->func_decl.params[i].name);
+                else
+                    emit("%s %s", pct, n->func_decl.params[i].name);
             }
         }
     }
@@ -1049,7 +1282,10 @@ static void gen_forward_decl(Node *n) {
         return;
     }
 
-    emit("%s %s(", retct, n->func_decl.name);
+    if (is_arc_type(n->func_decl.ret))
+        emit("%s *%s(", retct, n->func_decl.name);
+    else
+        emit("%s %s(", retct, n->func_decl.name);
     emit_params(n);
     emit(");\n");
 
@@ -1164,7 +1400,10 @@ static void gen_func(Node *n) {
     if (is_main) {
         emit("int main(void) {\n");
     } else {
-        emit("%s %s(", retct, n->func_decl.name);
+        if (is_arc_type(n->func_decl.ret))
+            emit("%s *%s(", retct, n->func_decl.name);
+        else
+            emit("%s %s(", retct, n->func_decl.name);
         emit_params(n);
         emit(") {\n");
     }
@@ -1175,11 +1414,29 @@ static void gen_func(Node *n) {
     }
 
     indent = 1;
+
+    if (moxy_arc_enabled) {
+        arc_push_scope();
+        for (int i = 0; i < n->func_decl.nparams; i++) {
+            const char *pt = n->func_decl.params[i].type;
+            if (is_arc_type(pt)) {
+                char pct[128];
+                c_type_buf(pt, pct);
+                emitln("%s_retain(%s);", pct, n->func_decl.params[i].name);
+                arc_register_var(n->func_decl.params[i].name, pt);
+            }
+        }
+    }
+
     for (int i = 0; i < n->func_decl.nbody; i++)
         gen_stmt(n->func_decl.body[i]);
 
-    if (is_main)
+    if (is_main) {
+        if (moxy_arc_enabled) arc_pop_scope();
         emitln("return 0;");
+    } else {
+        if (moxy_arc_enabled) arc_pop_scope();
+    }
 
     indent = 0;
     emit("}\n\n");
@@ -1247,6 +1504,8 @@ const char *codegen(Node *program) {
     forin_counter = 0;
     async_counter = 0;
     has_futures = 0;
+    arc_depth = 0;
+    memset(arc_scopes, 0, sizeof(arc_scopes));
     memset(out, 0, sizeof(out));
 
     collect_types(program);

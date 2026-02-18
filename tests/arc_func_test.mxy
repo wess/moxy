@@ -1,0 +1,21 @@
+int list_sum(int[] nums) {
+    int total = 0;
+    for (int i = 0; i < nums.len; i++) {
+        total += nums[i];
+    }
+    return total;
+}
+
+int[] make_list() {
+    int[] result = [10, 20, 30];
+    return result;
+}
+
+void main() {
+    int[] a = [1, 2, 3];
+    assert(list_sum(a) == 6);
+
+    int[] b = make_list();
+    assert(b.len == 3);
+    assert(b[1] == 20);
+}
