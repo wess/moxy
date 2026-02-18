@@ -21,6 +21,7 @@ Moxy keeps everything good about C — same types, same control flow, same menta
 | Error handling | `Result<int> r = Ok(42);` | Manual result struct |
 | Dynamic arrays | `int[] nums = [1, 2, 3];` | Manual malloc + realloc |
 | Hash maps | `map[string,int] m = {};` | Manual implementation |
+| Pipe operator | `x \|> double_it() \|> add(1)` | `add(double_it(x), 1)` |
 | File includes | `#include "math.mxy"` | N/A (textual inlining) |
 
 Everything else is standard C: `if`/`else`, `for`, `while`, `return`, all arithmetic/comparison/logical operators, functions with typed parameters, recursion, global variables, and comments.
@@ -99,13 +100,53 @@ All release assets include SHA-256 checksums in `checksums.txt`.
 
 ## Quick Start
 
-### Transpile and run
+```sh
+moxy run hello.mxy
+```
+
+That's it — one command to transpile, compile, and execute.
+
+### Commands
+
+```
+moxy run <file.mxy> [args]      transpile, compile, and execute
+moxy build <file.mxy> [-o out]  transpile and compile to binary
+moxy test [files...]            discover and run *_test.mxy files
+moxy fmt [file.mxy] [--check]   format source (in-place or check-only)
+moxy lint [file.mxy]            lint source for issues
+moxy <file.mxy>                 transpile to C on stdout
+```
+
+`run` passes extra arguments through to the compiled program. `build` produces a binary (defaults to the source filename without `.mxy`). `test` discovers `*_test.mxy` files recursively or runs specific files you pass. `fmt` formats source files in-place (or checks with `--check`). `lint` checks for unused variables, empty blocks, and shadowed variables. Both `fmt` and `lint` discover `.mxy` files recursively when no file is given, and read settings from `moxyfmt.yaml` if present. All commands respect `CC` and `CFLAGS` environment variables.
+
+### Testing
+
+Name test files with a `_test.mxy` suffix and use `assert`:
+
+```
+// math_test.mxy
+int square(int n) {
+  return n * n;
+}
+
+void main() {
+  assert(square(5) == 25);
+  assert(square(0) == 0);
+  assert(square(-3) == 9);
+}
+```
 
 ```sh
-moxy examples/features.mxy > out.c
-cc -std=c11 -o out out.c
-./out
+moxy test
 ```
+
+```
+  test tests/math_test.mxy ... ok (42ms)
+
+  1 passed, 0 failed (1 total) in 0.0s
+```
+
+`assert(expr)` prints the source line number and exits with code 1 on failure.
 
 ## Examples
 
@@ -298,6 +339,33 @@ void main() {
 
 Maps support `set`, `get`, `has`, and `len`. String keys use `strcmp`, numeric keys use `==`.
 
+### Pipe Operator
+
+Chain function calls left-to-right with `|>`:
+
+```
+int double_it(int x) {
+  return x * 2;
+}
+
+int add(int a, int b) {
+  return a + b;
+}
+
+void main() {
+  int result = 5 |> double_it();
+  print(result);    // 10
+
+  // chained pipes
+  5 |> double_it() |> add(3) |> print()    // 13
+
+  // bare function name (no parens) also works
+  10 |> double_it |> print()    // 20
+}
+```
+
+The pipe operator passes the left-hand value as the first argument to the right-hand function. `a |> f(b)` becomes `f(a, b)`. Pipes are left-associative, so `a |> f() |> g()` becomes `g(f(a))`.
+
 ### Includes
 
 Split code across multiple files:
@@ -364,7 +432,19 @@ list_int_push(&nums, 4);
 printf("%d\n", nums.data[0]);
 ```
 
-Along with the `list_int` struct and helper functions. The output compiles with any C11 compiler.
+Along with the `list_int` struct and helper functions. Pipes desugar at compile time:
+
+```
+5 |> double_it() |> add(3)
+```
+
+Becomes:
+
+```c
+add(double_it(5), 3)
+```
+
+The output compiles with any C11 compiler.
 
 ## Documentation
 
@@ -397,7 +477,13 @@ src/
   ast.h/c        — AST node definitions
   parser.h/c     — recursive descent parser
   codegen.h/c    — C code generator with monomorphization
+  diag.h/c       — error and warning diagnostics
+  fmt.h/c        — source formatter
+  lint.h/c       — static analysis linter
+  yaml.h/c       — moxyfmt.yaml config parser
   main.c         — CLI entry point and preprocessor
+tests/
+  *_test.mxy     — test suite (types, lists, maps, enums, functions, control flow)
 tools/
   asdf/          — asdf version manager plugin
   editors/zed/   — Zed editor extension

@@ -7,6 +7,7 @@ typedef enum {
     NODE_ENUM_DECL,
     NODE_FUNC_DECL,
     NODE_PRINT_STMT,
+    NODE_ASSERT_STMT,
     NODE_MATCH_STMT,
     NODE_EXPR_STMT,
     NODE_IF_STMT,
@@ -37,6 +38,8 @@ typedef enum {
     NODE_RAW,
     NODE_EXPR_TERNARY,
     NODE_EXPR_CAST,
+    NODE_FOR_IN_STMT,
+    NODE_EXPR_RANGE,
 } NodeKind;
 
 typedef struct Node Node;
@@ -70,12 +73,15 @@ typedef struct {
 
 struct Node {
     NodeKind kind;
+    int line;
+    int col;
     union {
         struct { Node *decls[64]; int ndecls; } program;
         struct { char type[64]; char name[64]; Node *value; } var_decl;
         struct { char name[64]; Variant variants[16]; int nvariants; } enum_decl;
         struct { char ret[64]; char name[64]; Param params[16]; int nparams; Node *body[256]; int nbody; } func_decl;
         struct { Node *arg; } print_stmt;
+        struct { Node *arg; int line; } assert_stmt;
         struct { char target[64]; MatchArm arms[16]; int narms; } match_stmt;
         struct { Node *expr; } expr_stmt;
         struct { Node *cond; Node *then_body; int nthen; Node *else_body; int nelse; } if_stmt;
@@ -104,6 +110,8 @@ struct Node {
         struct { char *text; } raw;
         struct { Node *cond; Node *then_expr; Node *else_expr; } ternary;
         struct { char type_text[128]; Node *operand; } cast;
+        struct { char var1[64]; char var2[64]; Node *iter; Node *body[256]; int nbody; } for_in_stmt;
+        struct { Node *start; Node *end; } range;
     };
 };
 

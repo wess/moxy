@@ -1,4 +1,5 @@
 #include "parser.h"
+#include "diag.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -11,17 +12,14 @@ static Token peek(void) { return toks[pos]; }
 static Token eat(TokenKind kind) {
     Token t = toks[pos];
     if (t.kind != kind) {
-        fprintf(stderr, "moxy: expected token %d, got %d ('%s') at %d:%d\n",
-                kind, t.kind, t.text, t.line, t.col);
-        exit(1);
+        diag_error_expected(t.line, t.col, kind, t.kind, t.text);
+        diag_bail();
     }
     pos++;
     return t;
 }
 
 static Token advance(void) { return toks[pos++]; }
-
-/* ---- type detection ---- */
 
 static int is_type_start(Token t) {
     return t.kind == TOK_STRING_KW || t.kind == TOK_INT_KW ||
@@ -38,12 +36,9 @@ static int is_type_start(Token t) {
            t.kind == TOK_ENUM_KW;
 }
 
-/* ---- type parsing ---- */
-
 static void parse_type(char *buf) {
     buf[0] = '\0';
 
-    /* leading qualifiers */
     for (;;) {
         Token t = peek();
         if (t.kind == TOK_CONST_KW || t.kind == TOK_VOLATILE_KW ||
@@ -90,7 +85,6 @@ static void parse_type(char *buf) {
         return;
     }
 
-    /* struct/union/enum Name */
     if (t.kind == TOK_STRUCT_KW || t.kind == TOK_UNION_KW || t.kind == TOK_ENUM_KW) {
         advance();
         if (buf[0]) strcat(buf, " ");
@@ -100,7 +94,6 @@ static void parse_type(char *buf) {
             strcat(buf, " ");
             strcat(buf, name.text);
         }
-        /* pointer suffixes */
         while (peek().kind == TOK_STAR) {
             advance();
             strcat(buf, "*");
@@ -108,7 +101,6 @@ static void parse_type(char *buf) {
         return;
     }
 
-    /* multi-word: unsigned int, unsigned long, signed char, long long, long double */
     if (t.kind == TOK_UNSIGNED_KW || t.kind == TOK_SIGNED_KW) {
         advance();
         if (buf[0]) strcat(buf, " ");
@@ -119,14 +111,12 @@ static void parse_type(char *buf) {
             advance();
             strcat(buf, " ");
             strcat(buf, next.text);
-            /* unsigned long long */
             if ((next.kind == TOK_LONG_KW) && peek().kind == TOK_LONG_KW) {
                 Token ll = advance();
                 strcat(buf, " ");
                 strcat(buf, ll.text);
             }
         }
-        /* pointer suffixes */
         while (peek().kind == TOK_STAR) {
             advance();
             strcat(buf, "*");
@@ -138,7 +128,6 @@ static void parse_type(char *buf) {
         advance();
         if (buf[0]) strcat(buf, " ");
         strcat(buf, t.text);
-        /* long long, long double, long int */
         Token next = peek();
         if (next.kind == TOK_LONG_KW || next.kind == TOK_DOUBLE_KW ||
             next.kind == TOK_INT_KW) {
@@ -146,7 +135,6 @@ static void parse_type(char *buf) {
             strcat(buf, " ");
             strcat(buf, next.text);
         }
-        /* pointer suffixes */
         while (peek().kind == TOK_STAR) {
             advance();
             strcat(buf, "*");
@@ -154,12 +142,10 @@ static void parse_type(char *buf) {
         return;
     }
 
-    /* simple base type or identifier */
     advance();
     if (buf[0]) strcat(buf, " ");
     strcat(buf, t.text);
 
-    /* T[] list shorthand */
     if (peek().kind == TOK_LBRACKET &&
         toks[pos + 1].kind == TOK_RBRACKET) {
         eat(TOK_LBRACKET);
@@ -170,7 +156,6 @@ static void parse_type(char *buf) {
         return;
     }
 
-    /* pointer suffixes */
     while (peek().kind == TOK_STAR) {
         advance();
         strcat(buf, "*");
@@ -180,8 +165,6 @@ static void parse_type(char *buf) {
 static Node *parse_expr(void);
 static Node *parse_expr_prec(int min_prec);
 static Node *parse_stmt(void);
-
-/* ---- raw passthrough helpers ---- */
 
 static int no_space_after(TokenKind k) {
     return k == TOK_LPAREN || k == TOK_LBRACKET || k == TOK_LBRACE ||
@@ -197,7 +180,6 @@ static int no_space_before(TokenKind k) {
 }
 
 static Node *raw_from_range(int start, int end) {
-    /* estimate size */
     int sz = 0;
     for (int i = start; i < end; i++)
         sz += (int)strlen(toks[i].text) + 2;
@@ -214,7 +196,6 @@ static Node *raw_from_range(int start, int end) {
             }
         }
         int tlen = (int)strlen(toks[i].text);
-        /* wrap string literals in quotes */
         if (toks[i].kind == TOK_STRLIT) {
             buf[bpos++] = '"';
             memcpy(buf + bpos, toks[i].text, tlen);
@@ -233,6 +214,8 @@ static Node *raw_from_range(int start, int end) {
     buf[bpos] = '\0';
 
     Node *n = node_new(NODE_RAW);
+    n->line = toks[start].line;
+    n->col = toks[start].col;
     n->raw.text = buf;
     return n;
 }
@@ -251,23 +234,18 @@ static Node *collect_raw_toplevel(void) {
         if (k == TOK_RBRACE || k == TOK_RPAREN || k == TOK_RBRACKET) depth--;
 
         if (k == TOK_SEMI && depth == 0) {
-            pos++; /* consume ; */
+            pos++;
             return raw_from_range(start, pos);
         }
-        /* } at depth 0: stop if no ; follows soon (function-like body)
-           but if ; comes eventually at depth 0, let it be caught above */
         if (k == TOK_RBRACE && depth == 0 && saw_brace) {
-            pos++; /* consume } */
-            /* check if more tokens follow on this declaration (e.g. typedef ... } Name;) */
+            pos++;
             if (toks[pos].kind == TOK_SEMI) {
-                pos++; /* consume ; */
+                pos++;
                 return raw_from_range(start, pos);
             }
-            /* if next token is an identifier or *, continue (typedef struct {...} Name;) */
             if (toks[pos].kind == TOK_IDENT || toks[pos].kind == TOK_STAR) {
-                continue; /* keep scanning for ; */
+                continue;
             }
-            /* otherwise this } ends the declaration */
             return raw_from_range(start, pos);
         }
         pos++;
@@ -289,16 +267,14 @@ static Node *collect_raw_stmt(void) {
         if (depth < 0) break;
 
         if (k == TOK_SEMI && depth == 0) {
-            pos++; /* consume ; */
+            pos++;
             return raw_from_range(start, pos);
         }
         if (k == TOK_RBRACE && depth == 0) {
-            pos++; /* consume } */
-            /* do-while: } followed by while(...); — keep scanning */
+            pos++;
             if (toks[pos].kind == TOK_WHILE_KW) {
-                continue; /* keep scanning for the ; */
+                continue;
             }
-            /* eat trailing ; after other block constructs */
             if (toks[pos].kind == TOK_SEMI) pos++;
             return raw_from_range(start, pos);
         }
@@ -307,8 +283,6 @@ static Node *collect_raw_stmt(void) {
 
     return raw_from_range(start, pos);
 }
-
-/* ---- expression detection ---- */
 
 static int is_expr_start(Token t) {
     return t.kind == TOK_IDENT || t.kind == TOK_LPAREN ||
@@ -324,8 +298,6 @@ static int is_expr_start(Token t) {
            t.kind == TOK_TILDE;
 }
 
-/* ---- C type keyword check (for cast detection) ---- */
-
 static int is_c_type_keyword(Token t) {
     return t.kind == TOK_INT_KW || t.kind == TOK_CHAR_KW ||
            t.kind == TOK_FLOAT_KW || t.kind == TOK_DOUBLE_KW ||
@@ -338,10 +310,9 @@ static int is_c_type_keyword(Token t) {
            t.kind == TOK_ENUM_KW;
 }
 
-/* ---- operator precedence ---- */
-
 static int binop_prec(TokenKind k) {
     switch (k) {
+    case TOK_PIPEARROW: return 0;
     case TOK_OR:      return 1;
     case TOK_AND:     return 2;
     case TOK_PIPE:    return 3;
@@ -388,18 +359,13 @@ static const char *binop_str(TokenKind k) {
     }
 }
 
-/* ---- primary expressions ---- */
-
 static Node *parse_primary(void) {
     Token t = peek();
 
-    /* cast expression: (type)expr */
     if (t.kind == TOK_LPAREN) {
-        /* check if this looks like a cast: ( type_keyword ... ) */
         if (is_c_type_keyword(toks[pos + 1])) {
             int save = pos;
-            advance(); /* eat ( */
-            /* collect type tokens until ) */
+            advance();
             int tstart = pos;
             int depth = 1;
             while (toks[pos].kind != TOK_EOF && depth > 0) {
@@ -408,16 +374,13 @@ static Node *parse_primary(void) {
                 if (depth > 0) pos++;
             }
             int tend = pos;
-            if (toks[pos].kind == TOK_RPAREN) pos++; /* eat ) */
+            if (toks[pos].kind == TOK_RPAREN) pos++;
 
-            /* check if what follows looks like an expression (otherwise it might be a paren expr) */
             if (is_expr_start(peek()) || peek().kind == TOK_LPAREN) {
-                /* build type text */
                 char tbuf[128] = {0};
                 for (int i = tstart; i < tend; i++) {
                     if (i > tstart) strcat(tbuf, " ");
                     if (toks[i].kind == TOK_STAR) {
-                        /* remove trailing space before * */
                         int len = (int)strlen(tbuf);
                         if (len > 0 && tbuf[len-1] == ' ') tbuf[len-1] = '\0';
                         strcat(tbuf, "*");
@@ -426,18 +389,20 @@ static Node *parse_primary(void) {
                     }
                 }
                 Node *n = node_new(NODE_EXPR_CAST);
+                n->line = t.line;
+                n->col = t.col;
                 strcpy(n->cast.type_text, tbuf);
                 n->cast.operand = parse_primary();
                 return n;
             }
 
-            /* not a cast, restore and treat as paren expr */
             pos = save;
         }
 
-        /* regular paren expression */
         advance();
         Node *n = node_new(NODE_EXPR_PAREN);
+        n->line = t.line;
+        n->col = t.col;
         n->paren.inner = parse_expr();
         eat(TOK_RPAREN);
         return n;
@@ -446,6 +411,8 @@ static Node *parse_primary(void) {
     if (t.kind == TOK_STRLIT) {
         advance();
         Node *n = node_new(NODE_EXPR_STRLIT);
+        n->line = t.line;
+        n->col = t.col;
         strcpy(n->strlit.value, t.text);
         return n;
     }
@@ -453,6 +420,8 @@ static Node *parse_primary(void) {
     if (t.kind == TOK_INTLIT) {
         advance();
         Node *n = node_new(NODE_EXPR_INTLIT);
+        n->line = t.line;
+        n->col = t.col;
         n->intlit.value = (int)strtol(t.text, NULL, 0);
         strcpy(n->intlit.text, t.text);
         return n;
@@ -461,6 +430,8 @@ static Node *parse_primary(void) {
     if (t.kind == TOK_FLOATLIT) {
         advance();
         Node *n = node_new(NODE_EXPR_FLOATLIT);
+        n->line = t.line;
+        n->col = t.col;
         strcpy(n->floatlit.value, t.text);
         return n;
     }
@@ -468,6 +439,8 @@ static Node *parse_primary(void) {
     if (t.kind == TOK_CHARLIT) {
         advance();
         Node *n = node_new(NODE_EXPR_CHARLIT);
+        n->line = t.line;
+        n->col = t.col;
         n->charlit.value = t.text[0];
         return n;
     }
@@ -475,19 +448,26 @@ static Node *parse_primary(void) {
     if (t.kind == TOK_TRUE_KW || t.kind == TOK_FALSE_KW) {
         advance();
         Node *n = node_new(NODE_EXPR_BOOLLIT);
+        n->line = t.line;
+        n->col = t.col;
         n->boollit.value = (t.kind == TOK_TRUE_KW) ? 1 : 0;
         return n;
     }
 
     if (t.kind == TOK_NULL_KW) {
         advance();
-        return node_new(NODE_EXPR_NULL);
+        Node *n = node_new(NODE_EXPR_NULL);
+        n->line = t.line;
+        n->col = t.col;
+        return n;
     }
 
     if (t.kind == TOK_OK_KW) {
         advance();
         eat(TOK_LPAREN);
         Node *n = node_new(NODE_EXPR_OK);
+        n->line = t.line;
+        n->col = t.col;
         n->ok_expr.inner = parse_expr();
         eat(TOK_RPAREN);
         return n;
@@ -497,6 +477,8 @@ static Node *parse_primary(void) {
         advance();
         eat(TOK_LPAREN);
         Node *n = node_new(NODE_EXPR_ERR);
+        n->line = t.line;
+        n->col = t.col;
         n->err_expr.inner = parse_expr();
         eat(TOK_RPAREN);
         return n;
@@ -505,6 +487,8 @@ static Node *parse_primary(void) {
     if (t.kind == TOK_LBRACKET) {
         advance();
         Node *n = node_new(NODE_EXPR_LIST_LIT);
+        n->line = t.line;
+        n->col = t.col;
         n->list_lit.nitems = 0;
         while (peek().kind != TOK_RBRACKET) {
             n->list_lit.items[n->list_lit.nitems++] = parse_expr();
@@ -514,79 +498,59 @@ static Node *parse_primary(void) {
         return n;
     }
 
-    /* brace initializer: {expr, expr, ...} or {} */
     if (t.kind == TOK_LBRACE) {
         int start = pos;
-        advance(); /* eat { */
+        advance();
         if (peek().kind == TOK_RBRACE) {
-            advance(); /* eat } */
-            return node_new(NODE_EXPR_EMPTY);
+            advance();
+            Node *ne = node_new(NODE_EXPR_EMPTY);
+            ne->line = t.line;
+            ne->col = t.col;
+            return ne;
         }
-        /* collect all tokens inside braces as raw */
         int depth = 1;
         while (toks[pos].kind != TOK_EOF && depth > 0) {
             if (toks[pos].kind == TOK_LBRACE) depth++;
             if (toks[pos].kind == TOK_RBRACE) depth--;
             if (depth > 0) pos++;
         }
-        if (toks[pos].kind == TOK_RBRACE) pos++; /* eat closing } */
+        if (toks[pos].kind == TOK_RBRACE) pos++;
         return raw_from_range(start, pos);
     }
 
-    /* sizeof(type/expr) */
     if (t.kind == TOK_SIZEOF_KW) {
         int start = pos;
-        advance(); /* eat sizeof */
+        advance();
         if (peek().kind == TOK_LPAREN) {
-            advance(); /* eat ( */
+            advance();
             int depth = 1;
             while (toks[pos].kind != TOK_EOF && depth > 0) {
                 if (toks[pos].kind == TOK_LPAREN) depth++;
                 if (toks[pos].kind == TOK_RPAREN) depth--;
                 if (depth > 0) pos++;
             }
-            if (toks[pos].kind == TOK_RPAREN) pos++; /* eat ) */
+            if (toks[pos].kind == TOK_RPAREN) pos++;
         }
         return raw_from_range(start, pos);
     }
 
-    /* unary operators: !, -, ~, &(address-of), *(deref), ++, -- */
-    if (t.kind == TOK_BANG || t.kind == TOK_MINUS || t.kind == TOK_TILDE) {
+    if (t.kind == TOK_BANG || t.kind == TOK_MINUS || t.kind == TOK_TILDE ||
+        t.kind == TOK_AMP || t.kind == TOK_STAR) {
         advance();
         Node *n = node_new(NODE_EXPR_UNARY);
+        n->line = t.line;
+        n->col = t.col;
         strcpy(n->unary.op, t.text);
         n->unary.operand = parse_primary();
         return n;
     }
 
-    if (t.kind == TOK_AMP) {
+    if (t.kind == TOK_PLUSPLUS || t.kind == TOK_MINUSMINUS) {
         advance();
         Node *n = node_new(NODE_EXPR_UNARY);
-        strcpy(n->unary.op, "&");
-        n->unary.operand = parse_primary();
-        return n;
-    }
-
-    if (t.kind == TOK_STAR) {
-        advance();
-        Node *n = node_new(NODE_EXPR_UNARY);
-        strcpy(n->unary.op, "*");
-        n->unary.operand = parse_primary();
-        return n;
-    }
-
-    if (t.kind == TOK_PLUSPLUS) {
-        advance();
-        Node *n = node_new(NODE_EXPR_UNARY);
-        strcpy(n->unary.op, "++");
-        n->unary.operand = parse_primary();
-        return n;
-    }
-
-    if (t.kind == TOK_MINUSMINUS) {
-        advance();
-        Node *n = node_new(NODE_EXPR_UNARY);
-        strcpy(n->unary.op, "--");
+        n->line = t.line;
+        n->col = t.col;
+        strcpy(n->unary.op, t.text);
         n->unary.operand = parse_primary();
         return n;
     }
@@ -594,12 +558,13 @@ static Node *parse_primary(void) {
     if (t.kind == TOK_IDENT) {
         Token name = advance();
 
-        /* enum constructor: Name::Variant(...) */
         if (peek().kind == TOK_COLONCOLON) {
             eat(TOK_COLONCOLON);
             Token variant = eat(TOK_IDENT);
 
             Node *n = node_new(NODE_EXPR_ENUM_INIT);
+            n->line = name.line;
+            n->col = name.col;
             strcpy(n->enum_init.ename, name.text);
             strcpy(n->enum_init.vname, variant.text);
             n->enum_init.nargs = 0;
@@ -615,10 +580,12 @@ static Node *parse_primary(void) {
             return n;
         }
 
-        /* function call: name(...) - but not print */
-        if (peek().kind == TOK_LPAREN && strcmp(name.text, "print") != 0) {
+        if (peek().kind == TOK_LPAREN && strcmp(name.text, "print") != 0 &&
+            strcmp(name.text, "assert") != 0) {
             eat(TOK_LPAREN);
             Node *n = node_new(NODE_EXPR_CALL);
+            n->line = name.line;
+            n->col = name.col;
             strcpy(n->call.name, name.text);
             n->call.nargs = 0;
             while (peek().kind != TOK_RPAREN) {
@@ -630,22 +597,47 @@ static Node *parse_primary(void) {
         }
 
         Node *n = node_new(NODE_EXPR_IDENT);
+        n->line = name.line;
+        n->col = name.col;
         strcpy(n->ident.name, name.text);
         return n;
     }
 
-    fprintf(stderr, "moxy: unexpected '%s' in expression at %d:%d\n",
-            t.text, t.line, t.col);
-    exit(1);
-}
+    {
+        char msg[256];
+        snprintf(msg, sizeof(msg), "unexpected %s in expression", tok_name(t.kind));
+        diag_error(t.line, t.col, msg);
 
-/* ---- postfix (dot, arrow, index, method) ---- */
+        /* suggest fixes for common mistakes */
+        if (t.kind == TOK_IDENT) {
+            if (strcmp(t.text, "str") == 0)
+                diag_hint("did you mean 'string'?");
+            else if (strcmp(t.text, "boolean") == 0)
+                diag_hint("did you mean 'bool'?");
+            else if (strcmp(t.text, "integer") == 0)
+                diag_hint("did you mean 'int'?");
+            else if (strcmp(t.text, "println") == 0)
+                diag_hint("did you mean 'print'?");
+            else if (strcmp(t.text, "fn") == 0 || strcmp(t.text, "func") == 0 ||
+                     strcmp(t.text, "function") == 0)
+                diag_hint("moxy uses C-style function syntax: int add(int a, int b) { ... }");
+            else if (strcmp(t.text, "let") == 0 || strcmp(t.text, "var") == 0 ||
+                     strcmp(t.text, "val") == 0)
+                diag_hint("moxy uses C-style declarations: int x = 42;");
+        } else if (t.kind == TOK_FATARROW) {
+            diag_hint("'=>' can only be used inside match arms");
+        } else if (t.kind == TOK_EOF) {
+            diag_hint("unexpected end of file — check for missing '}'");
+        }
+
+        diag_bail();
+    }
+}
 
 static Node *parse_postfix(void) {
     Node *left = parse_primary();
 
     for (;;) {
-        /* dot access */
         if (peek().kind == TOK_DOT) {
             eat(TOK_DOT);
             Token name = eat(TOK_IDENT);
@@ -653,6 +645,8 @@ static Node *parse_postfix(void) {
             if (peek().kind == TOK_LPAREN) {
                 eat(TOK_LPAREN);
                 Node *n = node_new(NODE_EXPR_METHOD);
+                n->line = name.line;
+                n->col = name.col;
                 n->method.target = left;
                 strcpy(n->method.name, name.text);
                 n->method.nargs = 0;
@@ -667,6 +661,8 @@ static Node *parse_postfix(void) {
             }
 
             Node *n = node_new(NODE_EXPR_FIELD);
+            n->line = name.line;
+            n->col = name.col;
             n->field.target = left;
             strcpy(n->field.name, name.text);
             n->field.is_arrow = 0;
@@ -674,7 +670,6 @@ static Node *parse_postfix(void) {
             continue;
         }
 
-        /* arrow access -> */
         if (peek().kind == TOK_ARROW) {
             eat(TOK_ARROW);
             Token name = eat(TOK_IDENT);
@@ -682,6 +677,8 @@ static Node *parse_postfix(void) {
             if (peek().kind == TOK_LPAREN) {
                 eat(TOK_LPAREN);
                 Node *n = node_new(NODE_EXPR_METHOD);
+                n->line = name.line;
+                n->col = name.col;
                 n->method.target = left;
                 strcpy(n->method.name, name.text);
                 n->method.nargs = 0;
@@ -696,6 +693,8 @@ static Node *parse_postfix(void) {
             }
 
             Node *n = node_new(NODE_EXPR_FIELD);
+            n->line = name.line;
+            n->col = name.col;
             n->field.target = left;
             strcpy(n->field.name, name.text);
             n->field.is_arrow = 1;
@@ -704,8 +703,11 @@ static Node *parse_postfix(void) {
         }
 
         if (peek().kind == TOK_LBRACKET) {
+            Token lbt = peek();
             eat(TOK_LBRACKET);
             Node *n = node_new(NODE_EXPR_INDEX);
+            n->line = lbt.line;
+            n->col = lbt.col;
             n->index.target = left;
             n->index.idx = parse_expr();
             eat(TOK_RBRACKET);
@@ -713,10 +715,11 @@ static Node *parse_postfix(void) {
             continue;
         }
 
-        /* postfix ++ / -- */
         if (peek().kind == TOK_PLUSPLUS || peek().kind == TOK_MINUSMINUS) {
             Token op = advance();
             Node *n = node_new(NODE_EXPR_UNARY);
+            n->line = op.line;
+            n->col = op.col;
             strcpy(n->unary.op, op.kind == TOK_PLUSPLUS ? "p++" : "p--");
             n->unary.operand = left;
             left = n;
@@ -729,8 +732,6 @@ static Node *parse_postfix(void) {
     return left;
 }
 
-/* ---- precedence climbing for binary ops + ternary ---- */
-
 static Node *parse_expr_prec(int min_prec) {
     Node *left = parse_postfix();
 
@@ -738,28 +739,89 @@ static Node *parse_expr_prec(int min_prec) {
         int prec = binop_prec(peek().kind);
         if (prec < min_prec) break;
 
-        /* disambiguate: TOK_AMP at prec 5 could be bitwise-and, but
-           if we're in a context where it'd conflict with address-of,
-           we've already handled prefix in parse_primary. Here it's always binary. */
+        if (peek().kind == TOK_PIPEARROW) {
+            Token pt = advance();
+            Node *right = parse_postfix();
+
+            if (right->kind == NODE_EXPR_CALL) {
+                for (int i = right->call.nargs; i > 0; i--)
+                    right->call.args[i] = right->call.args[i - 1];
+                right->call.args[0] = left;
+                right->call.nargs++;
+                left = right;
+            } else if (right->kind == NODE_EXPR_METHOD) {
+                for (int i = right->method.nargs; i > 0; i--)
+                    right->method.args[i] = right->method.args[i - 1];
+                right->method.args[0] = left;
+                right->method.nargs++;
+                left = right;
+            } else if (right->kind == NODE_EXPR_IDENT) {
+                if (strcmp(right->ident.name, "print") == 0) {
+                    if (peek().kind == TOK_LPAREN) {
+                        eat(TOK_LPAREN);
+                        if (peek().kind != TOK_RPAREN) {
+                            /* ignore extra args for print pipe */
+                            while (peek().kind != TOK_RPAREN) {
+                                parse_expr();
+                                if (peek().kind == TOK_COMMA) eat(TOK_COMMA);
+                            }
+                        }
+                        eat(TOK_RPAREN);
+                    }
+                    Node *n = node_new(NODE_PRINT_STMT);
+                    n->line = pt.line;
+                    n->col = pt.col;
+                    n->print_stmt.arg = left;
+                    left = n;
+                } else {
+                    Node *n = node_new(NODE_EXPR_CALL);
+                    n->line = pt.line;
+                    n->col = pt.col;
+                    strcpy(n->call.name, right->ident.name);
+                    n->call.args[0] = left;
+                    n->call.nargs = 1;
+                    if (peek().kind == TOK_LPAREN) {
+                        eat(TOK_LPAREN);
+                        while (peek().kind != TOK_RPAREN) {
+                            n->call.args[n->call.nargs++] = parse_expr();
+                            if (peek().kind == TOK_COMMA) eat(TOK_COMMA);
+                        }
+                        eat(TOK_RPAREN);
+                    }
+                    left = n;
+                }
+            } else {
+                char msg[128];
+                snprintf(msg, sizeof(msg), "expected function call after '|>'");
+                diag_error(pt.line, pt.col, msg);
+                diag_hint("pipe operator requires a function call on the right side");
+                diag_bail();
+            }
+            continue;
+        }
 
         Token op = advance();
         Node *right = parse_expr_prec(prec + 1);
 
         Node *n = node_new(NODE_EXPR_BINOP);
+        n->line = op.line;
+        n->col = op.col;
         strcpy(n->binop.op, binop_str(op.kind));
         n->binop.left = left;
         n->binop.right = right;
         left = n;
     }
 
-    /* ternary: expr ? expr : expr */
     if (peek().kind == TOK_QUESTION) {
-        advance(); /* eat ? */
+        Token qt = peek();
+        advance();
         Node *then_expr = parse_expr();
         eat(TOK_COLON);
         Node *else_expr = parse_expr_prec(1);
 
         Node *n = node_new(NODE_EXPR_TERNARY);
+        n->line = qt.line;
+        n->col = qt.col;
         n->ternary.cond = left;
         n->ternary.then_expr = then_expr;
         n->ternary.else_expr = else_expr;
@@ -770,15 +832,16 @@ static Node *parse_expr_prec(int min_prec) {
 }
 
 static Node *parse_expr(void) {
-    return parse_expr_prec(1);
+    return parse_expr_prec(0);
 }
 
-/* ---- statements ---- */
-
 static Node *parse_print(void) {
+    Token pt = peek();
     eat(TOK_IDENT);
     eat(TOK_LPAREN);
     Node *n = node_new(NODE_PRINT_STMT);
+    n->line = pt.line;
+    n->col = pt.col;
     n->print_stmt.arg = parse_expr();
     eat(TOK_RPAREN);
     if (peek().kind == TOK_SEMI) eat(TOK_SEMI);
@@ -786,11 +849,14 @@ static Node *parse_print(void) {
 }
 
 static Node *parse_match(void) {
+    Token mt = peek();
     eat(TOK_MATCH_KW);
     Token target = eat(TOK_IDENT);
     eat(TOK_LBRACE);
 
     Node *n = node_new(NODE_MATCH_STMT);
+    n->line = mt.line;
+    n->col = mt.col;
     strcpy(n->match_stmt.target, target.text);
     n->match_stmt.narms = 0;
 
@@ -836,13 +902,18 @@ static Node *parse_match(void) {
 }
 
 static Node *parse_if_stmt(void) {
+    Token ift = peek();
     eat(TOK_IF_KW);
     eat(TOK_LPAREN);
     Node *n = node_new(NODE_IF_STMT);
+    n->line = ift.line;
+    n->col = ift.col;
     n->if_stmt.cond = parse_expr();
     eat(TOK_RPAREN);
 
     Node *then_block = node_new(NODE_BLOCK);
+    then_block->line = ift.line;
+    then_block->col = ift.col;
     eat(TOK_LBRACE);
     then_block->block.nstmts = 0;
     while (peek().kind != TOK_RBRACE)
@@ -858,12 +929,16 @@ static Node *parse_if_stmt(void) {
         eat(TOK_ELSE_KW);
         if (peek().kind == TOK_IF_KW) {
             Node *else_block = node_new(NODE_BLOCK);
+            else_block->line = peek().line;
+            else_block->col = peek().col;
             else_block->block.nstmts = 1;
             else_block->block.stmts[0] = parse_if_stmt();
             n->if_stmt.else_body = else_block;
             n->if_stmt.nelse = 1;
         } else {
             Node *else_block = node_new(NODE_BLOCK);
+            else_block->line = peek().line;
+            else_block->col = peek().col;
             eat(TOK_LBRACE);
             else_block->block.nstmts = 0;
             while (peek().kind != TOK_RBRACE)
@@ -878,9 +953,12 @@ static Node *parse_if_stmt(void) {
 }
 
 static Node *parse_while_stmt(void) {
+    Token wt = peek();
     eat(TOK_WHILE_KW);
     eat(TOK_LPAREN);
     Node *n = node_new(NODE_WHILE_STMT);
+    n->line = wt.line;
+    n->col = wt.col;
     n->while_stmt.cond = parse_expr();
     eat(TOK_RPAREN);
     eat(TOK_LBRACE);
@@ -915,12 +993,55 @@ static void assign_op_str(TokenKind k, char *buf) {
     }
 }
 
+static Node *parse_for_in_stmt(void) {
+    Token var1 = eat(TOK_IDENT);
+    Node *n = node_new(NODE_FOR_IN_STMT);
+    n->line = var1.line;
+    n->col = var1.col;
+    strcpy(n->for_in_stmt.var1, var1.text);
+    n->for_in_stmt.var2[0] = '\0';
+
+    if (peek().kind == TOK_COMMA) {
+        eat(TOK_COMMA);
+        Token var2 = eat(TOK_IDENT);
+        strcpy(n->for_in_stmt.var2, var2.text);
+    }
+
+    eat(TOK_IN_KW);
+
+    Node *expr = parse_expr();
+    if (peek().kind == TOK_DOTDOT) {
+        eat(TOK_DOTDOT);
+        Node *range = node_new(NODE_EXPR_RANGE);
+        range->line = expr->line;
+        range->col = expr->col;
+        range->range.start = expr;
+        range->range.end = parse_expr();
+        n->for_in_stmt.iter = range;
+    } else {
+        n->for_in_stmt.iter = expr;
+    }
+
+    eat(TOK_LBRACE);
+    n->for_in_stmt.nbody = 0;
+    while (peek().kind != TOK_RBRACE)
+        n->for_in_stmt.body[n->for_in_stmt.nbody++] = parse_stmt();
+    eat(TOK_RBRACE);
+    return n;
+}
+
 static Node *parse_for_stmt(void) {
+    Token ft = peek();
     eat(TOK_FOR_KW);
+
+    if (peek().kind != TOK_LPAREN)
+        return parse_for_in_stmt();
+
     eat(TOK_LPAREN);
     Node *n = node_new(NODE_FOR_STMT);
+    n->line = ft.line;
+    n->col = ft.col;
 
-    /* init: var decl or expr stmt */
     if (is_type_start(peek())) {
         int save = pos;
         char type[64];
@@ -929,6 +1050,8 @@ static Node *parse_for_stmt(void) {
             Token name = eat(TOK_IDENT);
             eat(TOK_EQ);
             Node *vd = node_new(NODE_VAR_DECL);
+            vd->line = name.line;
+            vd->col = name.col;
             strcpy(vd->var_decl.type, type);
             strcpy(vd->var_decl.name, name.text);
             vd->var_decl.value = parse_expr();
@@ -942,21 +1065,23 @@ static Node *parse_for_stmt(void) {
     }
     eat(TOK_SEMI);
 
-    /* condition */
     n->for_stmt.cond = parse_expr();
     eat(TOK_SEMI);
 
-    /* step: could be assignment (x = x + 1) or expr (x++) */
     Node *step_expr = parse_expr();
     if (is_assign_op(peek().kind)) {
         Token op = advance();
         Node *a = node_new(NODE_ASSIGN);
+        a->line = op.line;
+        a->col = op.col;
         a->assign.target = step_expr;
         assign_op_str(op.kind, a->assign.op);
         a->assign.value = parse_expr();
         n->for_stmt.step = a;
     } else {
         Node *es = node_new(NODE_EXPR_STMT);
+        es->line = step_expr->line;
+        es->col = step_expr->col;
         es->expr_stmt.expr = step_expr;
         n->for_stmt.step = es;
     }
@@ -971,8 +1096,11 @@ static Node *parse_for_stmt(void) {
 }
 
 static Node *parse_return_stmt(void) {
+    Token rt = peek();
     eat(TOK_RETURN_KW);
     Node *n = node_new(NODE_RETURN_STMT);
+    n->line = rt.line;
+    n->col = rt.col;
     if (peek().kind != TOK_SEMI)
         n->return_stmt.value = parse_expr();
     else
@@ -981,11 +1109,64 @@ static Node *parse_return_stmt(void) {
     return n;
 }
 
+static void check_wrong_keyword(Token t) {
+    if (t.kind != TOK_IDENT || toks[pos + 1].kind != TOK_IDENT)
+        return;
+
+    int span = (int)strlen(t.text);
+
+    if (strcmp(t.text, "str") == 0) {
+        diag_error_span(t.line, t.col, span, "unknown type 'str'");
+        diag_hint("did you mean 'string'?");
+        diag_bail();
+    }
+    if (strcmp(t.text, "boolean") == 0) {
+        diag_error_span(t.line, t.col, span, "unknown type 'boolean'");
+        diag_hint("did you mean 'bool'?");
+        diag_bail();
+    }
+    if (strcmp(t.text, "integer") == 0) {
+        diag_error_span(t.line, t.col, span, "unknown type 'integer'");
+        diag_hint("did you mean 'int'?");
+        diag_bail();
+    }
+    if (strcmp(t.text, "let") == 0 || strcmp(t.text, "var") == 0 ||
+        strcmp(t.text, "val") == 0) {
+        char msg[128];
+        snprintf(msg, sizeof(msg), "'%s' is not a moxy keyword", t.text);
+        diag_error_span(t.line, t.col, span, msg);
+        diag_hint("moxy uses C-style declarations: int x = 42;");
+        diag_bail();
+    }
+    if (strcmp(t.text, "fn") == 0 || strcmp(t.text, "func") == 0 ||
+        strcmp(t.text, "function") == 0 || strcmp(t.text, "def") == 0) {
+        char msg[128];
+        snprintf(msg, sizeof(msg), "'%s' is not a moxy keyword", t.text);
+        diag_error_span(t.line, t.col, span, msg);
+        diag_hint("moxy uses C-style function syntax: int add(int a, int b) { ... }");
+        diag_bail();
+    }
+}
+
 static Node *parse_stmt(void) {
     Token t = peek();
 
     if (t.kind == TOK_IDENT && strcmp(t.text, "print") == 0)
         return parse_print();
+
+    if (t.kind == TOK_IDENT && strcmp(t.text, "assert") == 0) {
+        int line = t.line;
+        eat(TOK_IDENT);
+        eat(TOK_LPAREN);
+        Node *n = node_new(NODE_ASSERT_STMT);
+        n->line = t.line;
+        n->col = t.col;
+        n->assert_stmt.arg = parse_expr();
+        n->assert_stmt.line = line;
+        eat(TOK_RPAREN);
+        if (peek().kind == TOK_SEMI) eat(TOK_SEMI);
+        return n;
+    }
 
     if (t.kind == TOK_MATCH_KW)
         return parse_match();
@@ -1002,11 +1183,9 @@ static Node *parse_stmt(void) {
     if (t.kind == TOK_RETURN_KW)
         return parse_return_stmt();
 
-    /* label: ident followed by colon (not ::) */
     if (t.kind == TOK_IDENT && toks[pos + 1].kind == TOK_COLON)
         return collect_raw_stmt();
 
-    /* C statement keywords that we pass through raw */
     if (t.kind == TOK_SWITCH_KW || t.kind == TOK_DO_KW ||
         t.kind == TOK_GOTO_KW || t.kind == TOK_TYPEDEF_KW ||
         t.kind == TOK_STRUCT_KW || t.kind == TOK_UNION_KW ||
@@ -1014,19 +1193,18 @@ static Node *parse_stmt(void) {
         t.kind == TOK_VOLATILE_KW || t.kind == TOK_INLINE_KW)
         return collect_raw_stmt();
 
-    /* break; and continue; as raw */
     if (t.kind == TOK_BREAK_KW || t.kind == TOK_CONTINUE_KW ||
         t.kind == TOK_CASE_KW || t.kind == TOK_DEFAULT_KW)
         return collect_raw_stmt();
 
-    /* var decl: type name = expr; or type name; */
+    check_wrong_keyword(t);
+
     if (is_type_start(t)) {
         int save = pos;
         char type[64];
         parse_type(type);
 
         if (peek().kind == TOK_IDENT) {
-            /* check the token after the ident to decide */
             Token name_tok = toks[pos];
             TokenKind after = toks[pos + 1].kind;
 
@@ -1034,6 +1212,8 @@ static Node *parse_stmt(void) {
                 eat(TOK_IDENT);
                 eat(TOK_EQ);
                 Node *n = node_new(NODE_VAR_DECL);
+                n->line = name_tok.line;
+                n->col = name_tok.col;
                 strcpy(n->var_decl.type, type);
                 strcpy(n->var_decl.name, name_tok.text);
                 n->var_decl.value = parse_expr();
@@ -1042,23 +1222,18 @@ static Node *parse_stmt(void) {
             }
 
             if (after == TOK_SEMI) {
-                /* uninitialized var decl: int x; — pass through as raw */
                 pos = save;
                 return collect_raw_stmt();
             }
 
             if (after == TOK_LBRACKET || after == TOK_COMMA) {
-                /* C array decl: int arr[10]; or int a, b; — raw */
                 pos = save;
                 return collect_raw_stmt();
             }
 
             if (after == TOK_LPAREN) {
-                /* could be function pointer or nested function — but in statement
-                   context this is unusual, treat as expression */
                 pos = save;
             } else {
-                /* might be a function call that starts with a type-like ident */
                 pos = save;
             }
         } else {
@@ -1066,17 +1241,17 @@ static Node *parse_stmt(void) {
         }
     }
 
-    /* if token can't start an expression, collect as raw C statement */
     if (!is_expr_start(t))
         return collect_raw_stmt();
 
-    /* expression, possibly followed by assignment */
     {
         Node *expr = parse_expr();
 
         if (is_assign_op(peek().kind)) {
             Token op = advance();
             Node *n = node_new(NODE_ASSIGN);
+            n->line = op.line;
+            n->col = op.col;
             n->assign.target = expr;
             assign_op_str(op.kind, n->assign.op);
             n->assign.value = parse_expr();
@@ -1084,21 +1259,28 @@ static Node *parse_stmt(void) {
             return n;
         }
 
+        if (expr->kind == NODE_PRINT_STMT) {
+            if (peek().kind == TOK_SEMI) eat(TOK_SEMI);
+            return expr;
+        }
         Node *n = node_new(NODE_EXPR_STMT);
+        n->line = expr->line;
+        n->col = expr->col;
         n->expr_stmt.expr = expr;
         if (peek().kind == TOK_SEMI) eat(TOK_SEMI);
         return n;
     }
 }
 
-/* ---- top-level parsing ---- */
-
 static Node *parse_enum(void) {
+    Token et = peek();
     eat(TOK_ENUM_KW);
     Token name = eat(TOK_IDENT);
     eat(TOK_LBRACE);
 
     Node *n = node_new(NODE_ENUM_DECL);
+    n->line = et.line;
+    n->col = et.col;
     strcpy(n->enum_decl.name, name.text);
     n->enum_decl.nvariants = 0;
 
@@ -1129,17 +1311,18 @@ static Node *parse_enum(void) {
 }
 
 static Node *parse_func(const char *ret, const char *fname) {
+    Token fnt = peek();
     eat(TOK_LPAREN);
 
     Node *n = node_new(NODE_FUNC_DECL);
+    n->line = fnt.line;
+    n->col = fnt.col;
     strcpy(n->func_decl.ret, ret);
     strcpy(n->func_decl.name, fname);
     n->func_decl.nparams = 0;
     n->func_decl.nbody = 0;
 
-    /* parse parameters */
     while (peek().kind != TOK_RPAREN) {
-        /* handle ... (variadic) */
         if (peek().kind == TOK_ELLIPSIS) {
             Param *p = &n->func_decl.params[n->func_decl.nparams++];
             strcpy(p->type, "...");
@@ -1167,24 +1350,18 @@ static Node *parse_func(const char *ret, const char *fname) {
     return n;
 }
 
-/* check if an enum block is a C enum (just identifiers and = integer constants,
-   followed by }; ) vs a Moxy tagged enum (has parenthesized fields) */
 static int is_c_enum(void) {
     int save = pos;
-    /* we're positioned after "enum Name {" */
-    /* scan to find if there's a ( before the }, indicating Moxy variant fields */
     int depth = 1;
     while (toks[pos].kind != TOK_EOF && depth > 0) {
         if (toks[pos].kind == TOK_LBRACE) depth++;
         if (toks[pos].kind == TOK_RBRACE) depth--;
-        /* Moxy enums have (type name) field declarations inside variants */
         if (toks[pos].kind == TOK_LPAREN && depth == 1) {
             pos = save;
             return 0; /* Moxy tagged enum */
         }
         if (depth > 0) pos++;
     }
-    /* check if } is followed by ; (C enum) or not (Moxy enum) */
     int result = 0;
     if (toks[pos].kind == TOK_RBRACE) {
         result = (toks[pos + 1].kind == TOK_SEMI ||
@@ -1200,12 +1377,12 @@ Node *parse(Token *tokens, int ntokens) {
     (void)ntokens;
 
     Node *prog = node_new(NODE_PROGRAM);
+    prog->line = 1;
+    prog->col = 1;
     prog->program.ndecls = 0;
 
     while (peek().kind != TOK_EOF) {
-        /* enum: distinguish Moxy tagged enum vs C enum */
         if (peek().kind == TOK_ENUM_KW) {
-            /* look ahead: enum Name { ... } */
             if (toks[pos + 1].kind == TOK_IDENT &&
                 toks[pos + 2].kind == TOK_LBRACE) {
                 int save = pos;
@@ -1219,25 +1396,20 @@ Node *parse(Token *tokens, int ntokens) {
                     prog->program.decls[prog->program.ndecls++] = parse_enum();
                 }
             } else {
-                /* just "enum" without ident+brace, raw passthrough */
                 prog->program.decls[prog->program.ndecls++] = collect_raw_toplevel();
             }
             continue;
         }
 
-        /* typedef, struct, union at top level → raw passthrough */
         if (peek().kind == TOK_TYPEDEF_KW ||
             peek().kind == TOK_EXTERN_KW) {
             prog->program.decls[prog->program.ndecls++] = collect_raw_toplevel();
             continue;
         }
 
-        /* struct/union at top level: could be type definition or variable/function */
         if (peek().kind == TOK_STRUCT_KW || peek().kind == TOK_UNION_KW) {
-            /* struct Name { ... }; (type def) vs struct Name foo or struct Name func() */
             int save = pos;
-            /* look ahead for struct Name { → it's a struct definition, raw */
-            advance(); /* struct/union */
+            advance();
             if (peek().kind == TOK_IDENT) {
                 advance(); /* Name */
                 if (peek().kind == TOK_LBRACE) {
@@ -1246,11 +1418,8 @@ Node *parse(Token *tokens, int ntokens) {
                     prog->program.decls[prog->program.ndecls++] = collect_raw_toplevel();
                     continue;
                 }
-                /* struct Name ident → possibly a var decl or function */
                 pos = save;
-                /* fall through to type-start handling below */
             } else if (peek().kind == TOK_LBRACE) {
-                /* anonymous struct { ... } */
                 pos = save;
                 prog->program.decls[prog->program.ndecls++] = collect_raw_toplevel();
                 continue;
@@ -1261,6 +1430,8 @@ Node *parse(Token *tokens, int ntokens) {
             }
         }
 
+        check_wrong_keyword(peek());
+
         if (is_type_start(peek())) {
             int save = pos;
             char type[64];
@@ -1268,7 +1439,7 @@ Node *parse(Token *tokens, int ntokens) {
 
             if (peek().kind == TOK_IDENT) {
                 Token name_tok = toks[pos];
-                pos++; /* consume ident */
+                pos++;
 
                 if (peek().kind == TOK_LPAREN) {
                     pos--; /* unconsume ident — parse_func will re-read */
@@ -1278,25 +1449,24 @@ Node *parse(Token *tokens, int ntokens) {
                 } else if (peek().kind == TOK_EQ) {
                     eat(TOK_EQ);
                     Node *n = node_new(NODE_VAR_DECL);
+                    n->line = name_tok.line;
+                    n->col = name_tok.col;
                     strcpy(n->var_decl.type, type);
                     strcpy(n->var_decl.name, name_tok.text);
                     n->var_decl.value = parse_expr();
                     eat(TOK_SEMI);
                     prog->program.decls[prog->program.ndecls++] = n;
                 } else {
-                    /* something else (C array, uninitialized global, etc.) → raw */
                     pos = save;
                     prog->program.decls[prog->program.ndecls++] = collect_raw_toplevel();
                 }
             } else {
-                /* type but no ident after → could be function pointer, etc → raw */
                 pos = save;
                 prog->program.decls[prog->program.ndecls++] = collect_raw_toplevel();
             }
             continue;
         }
 
-        /* anything else at top level → raw passthrough */
         prog->program.decls[prog->program.ndecls++] = collect_raw_toplevel();
     }
 

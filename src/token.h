@@ -25,6 +25,7 @@ typedef enum {
     TOK_WHILE_KW,
     TOK_RETURN_KW,
     TOK_NULL_KW,
+    TOK_IN_KW,
 
     /* C keywords */
     TOK_STRUCT_KW,
@@ -99,11 +100,13 @@ typedef enum {
     TOK_RSHIFT,
     TOK_AMPEQ,
     TOK_PIPEEQ,
+    TOK_PIPEARROW,
     TOK_CARETEQ,
     TOK_PERCENTEQ,
     TOK_LSHIFTEQ,
     TOK_RSHIFTEQ,
     TOK_ELLIPSIS,
+    TOK_DOTDOT,
 
     TOK_UNKNOWN,
     TOK_EOF,

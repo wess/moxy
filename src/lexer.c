@@ -86,7 +86,6 @@ static TokenKind keyword(const char *w) {
     if (strcmp(w, "while") == 0) return TOK_WHILE_KW;
     if (strcmp(w, "return") == 0) return TOK_RETURN_KW;
     if (strcmp(w, "null") == 0) return TOK_NULL_KW;
-    /* C keywords */
     if (strcmp(w, "struct") == 0) return TOK_STRUCT_KW;
     if (strcmp(w, "union") == 0) return TOK_UNION_KW;
     if (strcmp(w, "typedef") == 0) return TOK_TYPEDEF_KW;
@@ -107,6 +106,7 @@ static TokenKind keyword(const char *w) {
     if (strcmp(w, "register") == 0) return TOK_REGISTER_KW;
     if (strcmp(w, "inline") == 0) return TOK_INLINE_KW;
     if (strcmp(w, "NULL") == 0) return TOK_NULL_KW;
+    if (strcmp(w, "in") == 0) return TOK_IN_KW;
     return TOK_IDENT;
 }
 
@@ -119,30 +119,27 @@ Token lexer_next(Lexer *l) {
 
     if (c == '\0') return tok(TOK_EOF, "", line, col);
 
-    /* string literals with escape handling */
     if (c == '"') {
         advance(l);
         int start = l->pos;
         while (peek(l) && peek(l) != '"') {
-            if (peek(l) == '\\') advance(l); /* skip escaped char */
+            if (peek(l) == '\\') advance(l);
             if (peek(l)) advance(l);
         }
         int len = l->pos - start;
         char buf[256] = {0};
         if (len > 255) len = 255;
         memcpy(buf, l->src + start, len);
-        advance(l); /* closing quote */
+        advance(l);
         return tok(TOK_STRLIT, buf, line, col);
     }
 
-    /* number literals: hex, float, suffixes */
     if (isdigit(c)) {
         int start = l->pos;
         int is_float = 0;
 
-        /* hex prefix */
         if (c == '0' && (peek2(l) == 'x' || peek2(l) == 'X')) {
-            advance(l); advance(l); /* consume 0x */
+            advance(l); advance(l);
             while (isxdigit(peek(l))) advance(l);
         } else {
             while (isdigit(peek(l))) advance(l);
@@ -151,7 +148,6 @@ Token lexer_next(Lexer *l) {
                 advance(l);
                 while (isdigit(peek(l))) advance(l);
             }
-            /* exponent */
             if (peek(l) == 'e' || peek(l) == 'E') {
                 is_float = 1;
                 advance(l);
@@ -160,7 +156,6 @@ Token lexer_next(Lexer *l) {
             }
         }
 
-        /* suffixes: L, U, UL, ULL, LL, f */
         while (peek(l) == 'L' || peek(l) == 'l' ||
                peek(l) == 'U' || peek(l) == 'u' ||
                peek(l) == 'f' || peek(l) == 'F') {
@@ -175,15 +170,14 @@ Token lexer_next(Lexer *l) {
         return tok(is_float ? TOK_FLOATLIT : TOK_INTLIT, buf, line, col);
     }
 
-    /* char literals with escape handling */
     if (c == '\'') {
         advance(l);
         int start = l->pos;
         if (peek(l) == '\\') {
-            advance(l); /* backslash */
-            advance(l); /* escaped char */
+            advance(l);
+            advance(l);
         } else {
-            advance(l); /* single char */
+            advance(l);
         }
         int len = l->pos - start;
         char buf[8] = {0};
@@ -203,15 +197,14 @@ Token lexer_next(Lexer *l) {
         return tok(keyword(buf), buf, line, col);
     }
 
-    /* three-char tokens */
     char c2 = peek2(l);
     char c3 = peek3(l);
 
     if (c == '<' && c2 == '<' && c3 == '=') { advance(l); advance(l); advance(l); return tok(TOK_LSHIFTEQ, "<<=", line, col); }
     if (c == '>' && c2 == '>' && c3 == '=') { advance(l); advance(l); advance(l); return tok(TOK_RSHIFTEQ, ">>=", line, col); }
     if (c == '.' && c2 == '.' && c3 == '.') { advance(l); advance(l); advance(l); return tok(TOK_ELLIPSIS, "...", line, col); }
+    if (c == '.' && c2 == '.' && c3 != '.') { advance(l); advance(l); return tok(TOK_DOTDOT, "..", line, col); }
 
-    /* two-char tokens */
     if (c == ':' && c2 == ':') { advance(l); advance(l); return tok(TOK_COLONCOLON, "::", line, col); }
     if (c == '=' && c2 == '>') { advance(l); advance(l); return tok(TOK_FATARROW, "=>", line, col); }
     if (c == '=' && c2 == '=') { advance(l); advance(l); return tok(TOK_EQEQ, "==", line, col); }
@@ -223,6 +216,7 @@ Token lexer_next(Lexer *l) {
     if (c == '&' && c2 == '&') { advance(l); advance(l); return tok(TOK_AND, "&&", line, col); }
     if (c == '&' && c2 == '=') { advance(l); advance(l); return tok(TOK_AMPEQ, "&=", line, col); }
     if (c == '|' && c2 == '|') { advance(l); advance(l); return tok(TOK_OR, "||", line, col); }
+    if (c == '|' && c2 == '>') { advance(l); advance(l); return tok(TOK_PIPEARROW, "|>", line, col); }
     if (c == '|' && c2 == '=') { advance(l); advance(l); return tok(TOK_PIPEEQ, "|=", line, col); }
     if (c == '^' && c2 == '=') { advance(l); advance(l); return tok(TOK_CARETEQ, "^=", line, col); }
     if (c == '%' && c2 == '=') { advance(l); advance(l); return tok(TOK_PERCENTEQ, "%=", line, col); }
@@ -234,7 +228,6 @@ Token lexer_next(Lexer *l) {
     if (c == '+' && c2 == '+') { advance(l); advance(l); return tok(TOK_PLUSPLUS, "++", line, col); }
     if (c == '-' && c2 == '-') { advance(l); advance(l); return tok(TOK_MINUSMINUS, "--", line, col); }
 
-    /* single-char tokens */
     advance(l);
     switch (c) {
         case '{': return tok(TOK_LBRACE, "{", line, col);
@@ -263,7 +256,6 @@ Token lexer_next(Lexer *l) {
         case '~': return tok(TOK_TILDE, "~", line, col);
     }
 
-    /* unknown character — skip and continue instead of fatal error */
     char unk[4] = {c, '\0'};
     return tok(TOK_UNKNOWN, unk, line, col);
 }

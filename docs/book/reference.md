@@ -78,6 +78,10 @@ x += 5;
 
 `++`, `--` (postfix only)
 
+### Pipe
+
+`|>` — passes the left-hand value as the first argument to the right-hand function call.
+
 Operator precedence (highest to lowest):
 
 1. `*`, `/`, `%`
@@ -86,6 +90,7 @@ Operator precedence (highest to lowest):
 4. `==`, `!=`
 5. `&&`
 6. `||`
+7. `|>` (pipe, lowest precedence)
 
 ## Functions
 
@@ -116,6 +121,55 @@ void main() {
 }
 ```
 
+## Pipe Operator
+
+The pipe operator `|>` chains function calls left-to-right, passing the left-hand value as the first argument to the right-hand function:
+
+```
+expr |> func(args...)
+```
+
+Desugars to:
+
+```
+func(expr, args...)
+```
+
+### Examples
+
+```
+int double_it(int x) {
+  return x * 2;
+}
+
+int add(int a, int b) {
+  return a + b;
+}
+
+void main() {
+  // simple pipe
+  int result = 5 |> double_it();
+  print(result);    // 10
+
+  // chained pipes (left-associative)
+  5 |> double_it() |> add(3) |> print()    // 13
+
+  // bare function name without parens
+  10 |> double_it |> print()    // 20
+}
+```
+
+### How it works
+
+- `a |> f()` becomes `f(a)`
+- `a |> f(b, c)` becomes `f(a, b, c)`
+- `a |> f() |> g()` becomes `g(f(a))`
+- `a |> print()` desugars to `print(a)` with auto-format
+
+Pipe has the lowest operator precedence, so `1 + 2 |> f()` pipes `3` into `f`.
+
+The right-hand side must be a function call or bare function name. Bare names are called with the piped value as the only argument.
+
 ## Global Variables
 
 Variables declared outside any function are global:
@@ -145,6 +199,18 @@ print(true);       // printf("%d\n", true);
 ```
 
 Works with variables, expressions, method calls, and field access.
+
+## Assert
+
+`assert(expr)` checks a condition at runtime and exits with an error if it fails:
+
+```
+assert(x == 42);
+assert(nums.len > 0);
+assert(ok);
+```
+
+On failure, prints `FAIL: assert at line N` to stderr and exits with code 1. Use in `*_test.mxy` files with `moxy test`.
 
 ## Control Flow
 
@@ -316,3 +382,7 @@ const char* name = NULL;
 | `#include "math.mxy"` | Contents inlined before lexing |
 | `#include <math.h>` | `#include <math.h>` (passed through) |
 | `null` | `NULL` |
+| `assert(x == 1);` | `if (!(x == 1)) { fprintf(stderr, "FAIL: ..."); exit(1); }` |
+| `x \|> f(y)` | `f(x, y)` |
+| `x \|> f() \|> g()` | `g(f(x))` |
+| `x \|> print()` | `printf("%d\n", x);` |

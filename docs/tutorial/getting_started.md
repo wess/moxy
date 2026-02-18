@@ -65,12 +65,18 @@ void main() {
 }
 ```
 
-Transpile and run:
+Run it:
 
 ```sh
-moxy hello.mxy > hello.c
-cc -std=c11 -o hello hello.c
-./hello
+moxy run hello.mxy
+```
+
+Or if you want to see the intermediate steps:
+
+```sh
+moxy hello.mxy > hello.c    # transpile to C
+cc -std=c11 -o hello hello.c # compile
+./hello                       # run
 ```
 
 Output:
@@ -341,6 +347,37 @@ You can also include C headers for use in the generated output:
 ```
 
 These are passed through directly to the generated C code. Moxy automatically avoids duplicating headers it already generates (like `<stdio.h>`).
+
+## Pipe Operator
+
+The pipe operator `|>` lets you chain function calls left-to-right, like Elixir or F#. The left side becomes the first argument to the function on the right:
+
+```
+int double_it(int x) {
+  return x * 2;
+}
+
+int add(int a, int b) {
+  return a + b;
+}
+
+void main() {
+  // without pipes
+  int result = add(double_it(5), 3);
+  print(result);    // 13
+
+  // same thing with pipes — reads left-to-right
+  5 |> double_it() |> add(3) |> print()    // 13
+}
+```
+
+Pipes are great for building data transformation pipelines. You can also omit the parentheses for single-argument functions:
+
+```
+void main() {
+  10 |> double_it |> print()    // 20
+}
+```
 
 ## What Happens Under the Hood
 

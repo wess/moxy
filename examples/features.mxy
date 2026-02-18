@@ -25,6 +25,10 @@ enum Shape {
 
 // ---- Functions with parameters ----
 
+int double_it(int x) {
+  return x * 2;
+}
+
 int add(int a, int b) {
   return a + b;
 }
@@ -228,4 +232,12 @@ void main() {
   print(ages.get("alice"));
   print(ages.has("bob"));
   print(ages.len);
+
+  // Pipe operator
+  int piped = 5 |> double_it();
+  print(piped);
+
+  5 |> double_it() |> add(3) |> print()
+
+  10 |> double_it |> print()
 }

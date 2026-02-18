@@ -25,6 +25,8 @@ static int nuser_includes;
 static char user_directives[128][512];
 static int nuser_directives;
 
+static int forin_counter;
+
 static void emit(const char *fmt, ...) {
     va_list ap;
     va_start(ap, fmt);
@@ -78,8 +80,6 @@ void codegen_add_directive(const char *line) {
     nuser_directives++;
 }
 
-/* ---- type helpers ---- */
-
 static int is_list_type(const char *t) {
     int len = (int)strlen(t);
     return len >= 3 && t[len-2] == '[' && t[len-1] == ']';
@@ -122,11 +122,6 @@ static void map_val(const char *t, char *buf) {
     buf[len] = '\0';
 }
 
-static void mangle(const char *mxy, char *buf) {
-    if (strcmp(mxy, "string") == 0) { strcpy(buf, "string"); return; }
-    strcpy(buf, mxy);
-}
-
 static const char *c_type_simple(const char *mxy) {
     if (strcmp(mxy, "string") == 0) return "const char*";
     if (strcmp(mxy, "int") == 0) return "int";
@@ -142,29 +137,24 @@ static const char *c_type_simple(const char *mxy) {
 
 static void c_type_buf(const char *mxy, char *buf) {
     if (is_list_type(mxy)) {
-        char elem[64], mg[64];
+        char elem[64];
         list_elem(mxy, elem);
-        mangle(elem, mg);
-        snprintf(buf, 128, "list_%s", mg);
+        snprintf(buf, 128, "list_%s", elem);
         return;
     }
     if (is_result_type(mxy)) {
-        char inner[64], mg[64];
+        char inner[64];
         result_inner(mxy, inner);
-        mangle(inner, mg);
-        snprintf(buf, 128, "Result_%s", mg);
+        snprintf(buf, 128, "Result_%s", inner);
         return;
     }
     if (is_map_type(mxy)) {
-        char k[64], v[64], mk[64], mv[64];
+        char k[64], v[64];
         map_key(mxy, k);
         map_val(mxy, v);
-        mangle(k, mk);
-        mangle(v, mv);
-        snprintf(buf, 128, "map_%s_%s", mk, mv);
+        snprintf(buf, 128, "map_%s_%s", k, v);
         return;
     }
-    /* handle "const string" → "const char*" and other qualified string types */
     if (strstr(mxy, "string")) {
         char tmp[128];
         strcpy(tmp, mxy);
@@ -179,7 +169,6 @@ static void c_type_buf(const char *mxy, char *buf) {
             return;
         }
     }
-    /* types containing * or spaces are already C types — pass through */
     if (strchr(mxy, '*') || strchr(mxy, ' ')) {
         strcpy(buf, mxy);
         return;
@@ -288,8 +277,6 @@ static const char *enum_field_name(const char *ename, const char *vname, int idx
     return "unknown";
 }
 
-/* ---- generic type codegen ---- */
-
 static void emit_list_type(const char *mxy_type) {
     char elem[64], celem[64], tname[128];
     list_elem(mxy_type, elem);
@@ -388,8 +375,6 @@ static void emit_map_type(const char *mxy_type) {
     emit("}\n\n");
 }
 
-/* ---- expression codegen ---- */
-
 static void gen_expr(Node *n);
 static void gen_stmt(Node *n);
 
@@ -480,7 +465,6 @@ static void gen_expr(Node *n) {
     }
     case NODE_EXPR_METHOD: {
         if (n->method.is_arrow) {
-            /* C arrow method call: target->name(args) */
             gen_expr(n->method.target);
             emit("->%s(", n->method.name);
             for (int i = 0; i < n->method.nargs; i++) {
@@ -489,7 +473,6 @@ static void gen_expr(Node *n) {
             }
             emit(")");
         } else {
-            /* Moxy dot method dispatch: type_name(&target, args) */
             const char *tt = NULL;
             if (n->method.target->kind == NODE_EXPR_IDENT)
                 tt = sym_type(n->method.target->ident.name);
@@ -539,14 +522,20 @@ static void gen_expr(Node *n) {
     }
 }
 
-/* ---- statement codegen ---- */
-
 static void gen_print(Node *n) {
     const char *f = fmt_for(n->print_stmt.arg);
     emit_indent();
     emit("printf(\"%s\\n\", ", f);
     gen_expr(n->print_stmt.arg);
     emit(");\n");
+}
+
+static void gen_assert(Node *n) {
+    emit_indent();
+    emit("if (!(");
+    gen_expr(n->assert_stmt.arg);
+    emit(")) { fprintf(stderr, \"FAIL: assert at line %d\\n\"); exit(1); }\n",
+         n->assert_stmt.line);
 }
 
 static void gen_match(Node *n) {
@@ -746,6 +735,83 @@ static void gen_for(Node *n) {
     emitln("}");
 }
 
+static void gen_for_in(Node *n) {
+    int idx = forin_counter++;
+
+    if (n->for_in_stmt.iter->kind == NODE_EXPR_RANGE) {
+        emit_indent();
+        emit("for (int %s = ", n->for_in_stmt.var1);
+        gen_expr(n->for_in_stmt.iter->range.start);
+        emit("; %s < ", n->for_in_stmt.var1);
+        gen_expr(n->for_in_stmt.iter->range.end);
+        emit("; %s++) {\n", n->for_in_stmt.var1);
+        sym_add(n->for_in_stmt.var1, "int");
+        indent++;
+        for (int i = 0; i < n->for_in_stmt.nbody; i++)
+            gen_stmt(n->for_in_stmt.body[i]);
+        indent--;
+        emitln("}");
+        return;
+    }
+
+    const char *coll_name = NULL;
+    if (n->for_in_stmt.iter->kind == NODE_EXPR_IDENT)
+        coll_name = n->for_in_stmt.iter->ident.name;
+
+    const char *coll_type = coll_name ? sym_type(coll_name) : NULL;
+
+    if (coll_type && is_list_type(coll_type)) {
+        char elem[64], celem[64];
+        list_elem(coll_type, elem);
+        c_type_buf(elem, celem);
+
+        emit_indent();
+        emit("for (int _fi%d = 0; _fi%d < ", idx, idx);
+        gen_expr(n->for_in_stmt.iter);
+        emit(".len; _fi%d++) {\n", idx);
+        indent++;
+        emit_indent();
+        emit("%s %s = ", celem, n->for_in_stmt.var1);
+        gen_expr(n->for_in_stmt.iter);
+        emit(".data[_fi%d];\n", idx);
+        sym_add(n->for_in_stmt.var1, elem);
+        for (int i = 0; i < n->for_in_stmt.nbody; i++)
+            gen_stmt(n->for_in_stmt.body[i]);
+        indent--;
+        emitln("}");
+    } else if (coll_type && is_map_type(coll_type)) {
+        char k[64], v[64], ck[64], cv[64];
+        map_key(coll_type, k);
+        map_val(coll_type, v);
+        c_type_buf(k, ck);
+        c_type_buf(v, cv);
+
+        emit_indent();
+        emit("for (int _fi%d = 0; _fi%d < ", idx, idx);
+        gen_expr(n->for_in_stmt.iter);
+        emit(".len; _fi%d++) {\n", idx);
+        indent++;
+        emit_indent();
+        emit("%s %s = ", ck, n->for_in_stmt.var1);
+        gen_expr(n->for_in_stmt.iter);
+        emit(".entries[_fi%d].key;\n", idx);
+        sym_add(n->for_in_stmt.var1, k);
+
+        if (n->for_in_stmt.var2[0] != '\0') {
+            emit_indent();
+            emit("%s %s = ", cv, n->for_in_stmt.var2);
+            gen_expr(n->for_in_stmt.iter);
+            emit(".entries[_fi%d].val;\n", idx);
+            sym_add(n->for_in_stmt.var2, v);
+        }
+
+        for (int i = 0; i < n->for_in_stmt.nbody; i++)
+            gen_stmt(n->for_in_stmt.body[i]);
+        indent--;
+        emitln("}");
+    }
+}
+
 static void gen_return(Node *n) {
     emit_indent();
     if (n->return_stmt.value) {
@@ -770,6 +836,9 @@ static void gen_stmt(Node *n) {
     case NODE_PRINT_STMT:
         gen_print(n);
         break;
+    case NODE_ASSERT_STMT:
+        gen_assert(n);
+        break;
     case NODE_VAR_DECL:
         gen_var_decl(n, 0);
         break;
@@ -784,6 +853,9 @@ static void gen_stmt(Node *n) {
         break;
     case NODE_FOR_STMT:
         gen_for(n);
+        break;
+    case NODE_FOR_IN_STMT:
+        gen_for_in(n);
         break;
     case NODE_RETURN_STMT:
         gen_return(n);
@@ -803,8 +875,6 @@ static void gen_stmt(Node *n) {
         break;
     }
 }
-
-/* ---- top-level codegen ---- */
 
 static void gen_enum(Node *n) {
     strcpy(enums[nenums].name, n->enum_decl.name);
@@ -847,14 +917,7 @@ static void gen_enum(Node *n) {
     emit("} %s;\n\n", name);
 }
 
-/* forward declarations for user-defined functions */
-static void gen_forward_decl(Node *n) {
-    char retct[128];
-    c_type_buf(n->func_decl.ret, retct);
-    int is_main = strcmp(n->func_decl.name, "main") == 0;
-    if (is_main) return;
-
-    emit("%s %s(", retct, n->func_decl.name);
+static void emit_params(Node *n) {
     if (n->func_decl.nparams == 0) {
         emit("void");
     } else {
@@ -869,9 +932,18 @@ static void gen_forward_decl(Node *n) {
             }
         }
     }
+}
+
+static void gen_forward_decl(Node *n) {
+    char retct[128];
+    c_type_buf(n->func_decl.ret, retct);
+    int is_main = strcmp(n->func_decl.name, "main") == 0;
+    if (is_main) return;
+
+    emit("%s %s(", retct, n->func_decl.name);
+    emit_params(n);
     emit(");\n");
 
-    /* register function name with its return type for inference */
     sym_add(n->func_decl.name, n->func_decl.ret);
 }
 
@@ -884,24 +956,10 @@ static void gen_func(Node *n) {
         emit("int main(void) {\n");
     } else {
         emit("%s %s(", retct, n->func_decl.name);
-        if (n->func_decl.nparams == 0) {
-            emit("void");
-        } else {
-            for (int i = 0; i < n->func_decl.nparams; i++) {
-                if (i > 0) emit(", ");
-                if (strcmp(n->func_decl.params[i].type, "...") == 0) {
-                    emit("...");
-                } else {
-                    char pct[128];
-                    c_type_buf(n->func_decl.params[i].type, pct);
-                    emit("%s %s", pct, n->func_decl.params[i].name);
-                }
-            }
-        }
+        emit_params(n);
         emit(") {\n");
     }
 
-    /* add params to symbol table */
     for (int i = 0; i < n->func_decl.nparams; i++) {
         if (strcmp(n->func_decl.params[i].type, "...") != 0)
             sym_add(n->func_decl.params[i].name, n->func_decl.params[i].type);
@@ -917,8 +975,6 @@ static void gen_func(Node *n) {
     indent = 0;
     emit("}\n\n");
 }
-
-/* ---- first pass: collect type instantiations ---- */
 
 static void collect_types(Node *n) {
     if (!n) return;
@@ -955,9 +1011,19 @@ static void collect_types(Node *n) {
         for (int i = 0; i < n->for_stmt.nbody; i++)
             collect_types(n->for_stmt.body[i]);
         break;
+    case NODE_FOR_IN_STMT:
+        for (int i = 0; i < n->for_in_stmt.nbody; i++)
+            collect_types(n->for_in_stmt.body[i]);
+        break;
     default:
         break;
     }
+}
+
+static int has_include(const char *inc) {
+    for (int i = 0; i < nuser_includes; i++)
+        if (strcmp(user_includes[i], inc) == 0) return 1;
+    return 0;
 }
 
 const char *codegen(Node *program) {
@@ -966,85 +1032,62 @@ const char *codegen(Node *program) {
     nsyms = 0;
     nenums = 0;
     ninsts = 0;
+    forin_counter = 0;
     memset(out, 0, sizeof(out));
 
     collect_types(program);
 
-    /* emit user-specified includes first */
     for (int i = 0; i < nuser_includes; i++)
         emit("%s\n", user_includes[i]);
 
-    /* auto-generated includes, skip if user already provided them */
     const char *auto_incs[] = {
+        "#include <stdlib.h>",
         "#include <stdio.h>",
         "#include <stdbool.h>",
         NULL
     };
 
-    int need_alloc = 0;
+    int need_string = 0;
     for (int i = 0; i < ninsts; i++)
         if (is_list_type(type_insts[i]) || is_map_type(type_insts[i]))
-            need_alloc = 1;
+            need_string = 1;
 
-    const char *alloc_incs[] = {
-        "#include <stdlib.h>",
-        "#include <string.h>",
-        NULL
-    };
+    for (int a = 0; auto_incs[a]; a++)
+        if (!has_include(auto_incs[a])) emit("%s\n", auto_incs[a]);
 
-    for (int a = 0; auto_incs[a]; a++) {
-        int dup = 0;
-        for (int u = 0; u < nuser_includes; u++)
-            if (strcmp(user_includes[u], auto_incs[a]) == 0) { dup = 1; break; }
-        if (!dup) emit("%s\n", auto_incs[a]);
-    }
-
-    if (need_alloc) {
-        for (int a = 0; alloc_incs[a]; a++) {
-            int dup = 0;
-            for (int u = 0; u < nuser_includes; u++)
-                if (strcmp(user_includes[u], alloc_incs[a]) == 0) { dup = 1; break; }
-            if (!dup) emit("%s\n", alloc_incs[a]);
-        }
-    }
+    if (need_string && !has_include("#include <string.h>"))
+        emit("#include <string.h>\n");
     emit("\n");
 
-    /* preprocessor directives (#define, #ifdef, etc.) */
     for (int i = 0; i < nuser_directives; i++)
         emit("%s\n", user_directives[i]);
 
-    /* enums first (user-defined) */
     for (int i = 0; i < program->program.ndecls; i++)
         if (program->program.decls[i]->kind == NODE_ENUM_DECL)
             gen_enum(program->program.decls[i]);
 
-    /* generic type instantiations */
     for (int i = 0; i < ninsts; i++) {
         if (is_list_type(type_insts[i])) emit_list_type(type_insts[i]);
         else if (is_result_type(type_insts[i])) emit_result_type(type_insts[i]);
         else if (is_map_type(type_insts[i])) emit_map_type(type_insts[i]);
     }
 
-    /* raw top-level declarations (structs, typedefs, C enums, etc.) */
     for (int i = 0; i < program->program.ndecls; i++) {
         if (program->program.decls[i]->kind == NODE_RAW)
             emit("%s\n", program->program.decls[i]->raw.text);
     }
 
-    /* forward declarations for functions */
     for (int i = 0; i < program->program.ndecls; i++)
         if (program->program.decls[i]->kind == NODE_FUNC_DECL)
             gen_forward_decl(program->program.decls[i]);
     emit("\n");
 
-    /* global variables */
     for (int i = 0; i < program->program.ndecls; i++) {
         if (program->program.decls[i]->kind != NODE_VAR_DECL) continue;
         gen_var_decl(program->program.decls[i], 1);
     }
     emit("\n");
 
-    /* functions */
     for (int i = 0; i < program->program.ndecls; i++)
         if (program->program.decls[i]->kind == NODE_FUNC_DECL)
             gen_func(program->program.decls[i]);
