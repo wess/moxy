@@ -1,0 +1,14 @@
+project:
+  name: "nes"
+  version: "0.1.0"
+  description: "NES emulator written in Moxy"
+  license: "MIT"
+
+build:
+  cflags: "-I/opt/homebrew/include -I/opt/homebrew/include/SDL2 -D_THREAD_SAFE"
+  ldflags: "-L/opt/homebrew/lib -lSDL2"
+
+plugins:
+  moxy:
+    ext: ".mxy"
+    command: "../../build/debug/moxy"

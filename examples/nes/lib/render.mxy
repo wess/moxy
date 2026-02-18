@@ -1,0 +1,74 @@
+// SDL2 rendering and input
+
+int render_init() {
+    if (SDL_Init(SDL_INIT_VIDEO) < 0) {
+        fprintf(stderr, "SDL init failed: %s\n", SDL_GetError());
+        return 0;
+    }
+
+    nes_window = SDL_CreateWindow("Moxy NES",
+        SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED,
+        512, 480, SDL_WINDOW_SHOWN);
+    if (!nes_window) {
+        fprintf(stderr, "Window creation failed: %s\n", SDL_GetError());
+        return 0;
+    }
+
+    nes_renderer = SDL_CreateRenderer(nes_window, -1,
+        SDL_RENDERER_ACCELERATED | SDL_RENDERER_PRESENTVSYNC);
+    if (!nes_renderer) {
+        fprintf(stderr, "Renderer creation failed: %s\n", SDL_GetError());
+        return 0;
+    }
+
+    nes_texture = SDL_CreateTexture(nes_renderer,
+        SDL_PIXELFORMAT_ARGB8888, SDL_TEXTUREACCESS_STREAMING,
+        256, 240);
+    if (!nes_texture) {
+        fprintf(stderr, "Texture creation failed: %s\n", SDL_GetError());
+        return 0;
+    }
+
+    nes_running = 1;
+    return 1;
+}
+
+void render_frame() {
+    SDL_UpdateTexture(nes_texture, NULL, framebuf, 256 * 4);
+    SDL_RenderClear(nes_renderer);
+    SDL_RenderCopy(nes_renderer, nes_texture, NULL, NULL);
+    SDL_RenderPresent(nes_renderer);
+}
+
+void render_input() {
+    SDL_Event event;
+    while (SDL_PollEvent(&event)) {
+        if (event.type == SDL_QUIT) {
+            nes_running = 0;
+            return;
+        }
+    }
+
+    // Read keyboard state
+    // Controller mapping:
+    //   A = Z, B = X, Select = RShift, Start = Enter
+    //   Up/Down/Left/Right = Arrow keys
+    const u8 *keys = SDL_GetKeyboardState(NULL);
+    ctrl_state = 0;
+    if (keys[SDL_SCANCODE_Z])      { ctrl_state |= 0x01; } // A
+    if (keys[SDL_SCANCODE_X])      { ctrl_state |= 0x02; } // B
+    if (keys[SDL_SCANCODE_RSHIFT]) { ctrl_state |= 0x04; } // Select
+    if (keys[SDL_SCANCODE_RETURN]) { ctrl_state |= 0x08; } // Start
+    if (keys[SDL_SCANCODE_UP])     { ctrl_state |= 0x10; } // Up
+    if (keys[SDL_SCANCODE_DOWN])   { ctrl_state |= 0x20; } // Down
+    if (keys[SDL_SCANCODE_LEFT])   { ctrl_state |= 0x40; } // Left
+    if (keys[SDL_SCANCODE_RIGHT])  { ctrl_state |= 0x80; } // Right
+    if (keys[SDL_SCANCODE_ESCAPE]) { nes_running = 0; }
+}
+
+void render_cleanup() {
+    if (nes_texture)  { SDL_DestroyTexture(nes_texture); }
+    if (nes_renderer) { SDL_DestroyRenderer(nes_renderer); }
+    if (nes_window)   { SDL_DestroyWindow(nes_window); }
+    SDL_Quit();
+}

@@ -1,0 +1,76 @@
+// CPU memory bus
+
+u8 cpu_read(u16 addr) {
+    int a = addr;
+    if (a < 0x2000) {
+        return cpu_ram[a & 0x07FF];
+    }
+    if (a < 0x4000) {
+        return ppu_reg_read(a & 0x07);
+    }
+    if (a == 0x4016) {
+        // Controller read
+        u8 val = (ctrl_shift >> 7) & 1;
+        ctrl_shift = ctrl_shift << 1;
+        return val;
+    }
+    if (a >= 0x6000 && a < 0x8000) {
+        // PRG-RAM (for MMC3, mapped to $6000-$7FFF)
+        return cpu_ram[a & 0x07FF]; // reuse ram space
+    }
+    if (a >= 0x8000) {
+        return mapper_prg_read(addr);
+    }
+    return 0;
+}
+
+void cpu_write(u16 addr, u8 val) {
+    int a = addr;
+    if (a < 0x2000) {
+        cpu_ram[a & 0x07FF] = val;
+        return;
+    }
+    if (a < 0x4000) {
+        ppu_reg_write(a & 0x07, val);
+        return;
+    }
+    if (a == 0x4014) {
+        // OAM DMA
+        u16 base = (unsigned short)val << 8;
+        for (int i = 0; i < 256; i++) {
+            ppu_oam[ppu_oamaddr] = cpu_read(base + i);
+            ppu_oamaddr++;
+        }
+        cpu_stall = cpu_stall + 513;
+        if (cpu_total_cycles % 2 == 1) {
+            cpu_stall++;
+        }
+        return;
+    }
+    if (a == 0x4016) {
+        // Controller strobe
+        ctrl_strobe = val & 1;
+        if (ctrl_strobe) {
+            ctrl_shift = ctrl_state;
+        }
+        return;
+    }
+    if (a >= 0x8000) {
+        mapper_write(addr, val);
+        return;
+    }
+}
+
+u16 cpu_read16(u16 addr) {
+    u8 lo = cpu_read(addr);
+    u8 hi = cpu_read(addr + 1);
+    return ((unsigned short)hi << 8) | (unsigned short)lo;
+}
+
+// Read 16-bit with page-wrapping bug (for indirect JMP)
+u16 cpu_read16_bug(u16 addr) {
+    u8 lo = cpu_read(addr);
+    u16 hi_addr = (addr & 0xFF00) | ((addr + 1) & 0x00FF);
+    u8 hi = cpu_read(hi_addr);
+    return ((unsigned short)hi << 8) | (unsigned short)lo;
+}

@@ -1,0 +1,59 @@
+// NES Cartridge loader (iNES format)
+
+int cart_load(string path) {
+    FILE *f = fopen(path, "rb");
+    if (!f) {
+        print("Error: cannot open ROM");
+        return 0;
+    }
+
+    // Read 16-byte iNES header
+    u8 header[16];
+    fread(header, 1, 16, f);
+
+    // Verify magic: "NES\x1a"
+    if (header[0] != 0x4E || header[1] != 0x45 ||
+        header[2] != 0x53 || header[3] != 0x1A) {
+        print("Error: not a valid iNES ROM");
+        fclose(f);
+        return 0;
+    }
+
+    int prg_banks = header[4];
+    int chr_banks = header[5];
+    u8 flags6 = header[6];
+
+    // Mirror mode from flags
+    mirror_mode = (flags6 & 1) ? 1 : 0;
+
+    // Mapper number
+    mapper = ((flags6 >> 4) & 0x0F) | (header[7] & 0xF0);
+    if (mapper != 0 && mapper != 4) {
+        fprintf(stderr, "Error: mapper %d not supported (only 0, 4)\n", mapper);
+        fclose(f);
+        return 0;
+    }
+
+    // Skip trainer if present
+    if (flags6 & 0x04) {
+        fseek(f, 512, SEEK_CUR);
+    }
+
+    // Load PRG-ROM (16KB per bank)
+    prg_size = prg_banks * 16384;
+    fread(prg_rom_data, 1, prg_size, f);
+
+    // Load CHR-ROM (8KB per bank) or use CHR-RAM
+    chr_size = chr_banks * 8192;
+    chr_is_ram = 0;
+    if (chr_size > 0) {
+        fread(chr_rom_data, 1, chr_size, f);
+    } else {
+        chr_is_ram = 1;
+        chr_size = 8192;
+        memset(chr_ram, 0, 8192);
+    }
+
+    fclose(f);
+    return 1;
+}

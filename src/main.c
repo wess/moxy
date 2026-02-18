@@ -159,6 +159,7 @@ static char *preprocess(const char *src, const char *srcpath) {
 }
 
 static const char *transpile(const char *path) {
+    codegen_reset_includes();
     char *raw = read_file(path);
     char *src = preprocess(raw, path);
     free(raw);
@@ -168,7 +169,7 @@ static const char *transpile(const char *path) {
     Lexer lexer;
     lexer_init(&lexer, src);
 
-    Token tokens[4096];
+    Token tokens[16384];
     int ntokens = 0;
     for (;;) {
         tokens[ntokens] = lexer_next(&lexer);
@@ -189,21 +190,34 @@ static void rmrf(const char *path) {
     system(cmd);
 }
 
-static int compile(const char *cpath, const char *binpath) {
+static int compile(const char *cpath, const char *binpath, const char *srcdir) {
     const char *cc = getenv("CC");
     if (!cc) cc = "cc";
 
-    const char *cflags = getenv("CFLAGS");
+    const char *env_cflags = getenv("CFLAGS");
     const char *pthread_flag = moxy_async_enabled ? " -lpthread" : "";
 
-    char cmd[2048];
-    if (cflags) {
-        snprintf(cmd, sizeof(cmd), "%s -std=c11 %s -o '%s' '%s'%s",
-                 cc, cflags, binpath, cpath, pthread_flag);
-    } else {
-        snprintf(cmd, sizeof(cmd), "%s -std=c11 -o '%s' '%s'%s",
-                 cc, binpath, cpath, pthread_flag);
+    /* look for goose.yaml in source directory for build flags */
+    char goose_cflags[512] = {0};
+    char goose_ldflags[512] = {0};
+    char *gpath = goose_find(srcdir);
+    if (gpath) {
+        GooseBuild gb = goose_load(gpath);
+        if (gb.cflags[0]) strncpy(goose_cflags, gb.cflags, sizeof(goose_cflags) - 1);
+        if (gb.ldflags[0]) strncpy(goose_ldflags, gb.ldflags, sizeof(goose_ldflags) - 1);
+        free(gpath);
     }
+
+    char cmd[4096];
+    int off = snprintf(cmd, sizeof(cmd), "%s -std=c11", cc);
+
+    if (env_cflags) off += snprintf(cmd + off, sizeof(cmd) - off, " %s", env_cflags);
+    if (goose_cflags[0]) off += snprintf(cmd + off, sizeof(cmd) - off, " %s", goose_cflags);
+
+    off += snprintf(cmd + off, sizeof(cmd) - off, " -o '%s' '%s'", binpath, cpath);
+
+    if (goose_ldflags[0]) off += snprintf(cmd + off, sizeof(cmd) - off, " %s", goose_ldflags);
+    if (pthread_flag[0]) off += snprintf(cmd + off, sizeof(cmd) - off, "%s", pthread_flag);
 
     int status = system(cmd);
     if (!WIFEXITED(status) || WEXITSTATUS(status) != 0) {
@@ -219,6 +233,8 @@ static int cmd_run(int argc, char **argv) {
     }
 
     const char *srcpath = argv[2];
+    char srcdir[512];
+    dir_of(srcpath, srcdir, sizeof(srcdir));
     const char *c_code = transpile(srcpath);
 
     char tmpdir[] = "/tmp/moxy_XXXXXX";
@@ -240,7 +256,7 @@ static int cmd_run(int argc, char **argv) {
     fputs(c_code, f);
     fclose(f);
 
-    int rc = compile(cpath, binpath);
+    int rc = compile(cpath, binpath, srcdir);
     if (rc != 0) {
         rmrf(tmpdir);
         return rc;
@@ -278,6 +294,8 @@ static int cmd_build(int argc, char **argv) {
     }
 
     const char *srcpath = argv[2];
+    char srcdir[512];
+    dir_of(srcpath, srcdir, sizeof(srcdir));
     const char *outpath = NULL;
 
     for (int i = 3; i < argc - 1; i++) {
@@ -318,7 +336,7 @@ static int cmd_build(int argc, char **argv) {
     fputs(c_code, f);
     fclose(f);
 
-    int rc = compile(cpath, outpath);
+    int rc = compile(cpath, outpath, srcdir);
     rmrf(tmpdir);
 
     if (rc == 0) {
@@ -361,7 +379,9 @@ static int run_one_test(const char *srcpath) {
     fputs(c_code, f);
     fclose(f);
 
-    int rc = compile(cpath, binpath);
+    char testdir[512];
+    dir_of(srcpath, testdir, sizeof(testdir));
+    int rc = compile(cpath, binpath, testdir);
     if (rc != 0) { rmrf(tmpdir); return rc; }
 
     pid_t pid = fork();
@@ -381,7 +401,7 @@ static int run_one_test(const char *srcpath) {
     return 1;
 }
 
-static void collect_test_files(const char *dir, char files[][512], int *count, int max) {
+static void collect_files(const char *dir, const char *suffix, char files[][512], int *count, int max) {
     DIR *d = opendir(dir);
     if (!d) return;
 
@@ -393,8 +413,8 @@ static void collect_test_files(const char *dir, char files[][512], int *count, i
         snprintf(path, sizeof(path), "%s/%s", dir, ent->d_name);
 
         if (ent->d_type == DT_DIR) {
-            collect_test_files(path, files, count, max);
-        } else if (ends_with(ent->d_name, "_test.mxy")) {
+            collect_files(path, suffix, files, count, max);
+        } else if (ends_with(ent->d_name, suffix)) {
             strncpy(files[*count], path, 511);
             files[*count][511] = '\0';
             (*count)++;
@@ -415,7 +435,7 @@ static int cmd_test(int argc, char **argv) {
             nfiles++;
         }
     } else {
-        collect_test_files(".", files, &nfiles, 256);
+        collect_files(".", "_test.mxy", files, &nfiles, 256);
     }
 
     if (nfiles == 0) {
@@ -454,28 +474,6 @@ static int cmd_test(int argc, char **argv) {
     return failed > 0 ? 1 : 0;
 }
 
-static void collect_mxy_files(const char *dir, char files[][512], int *count, int max) {
-    DIR *d = opendir(dir);
-    if (!d) return;
-
-    struct dirent *ent;
-    while ((ent = readdir(d)) != NULL && *count < max) {
-        if (ent->d_name[0] == '.') continue;
-
-        char path[512];
-        snprintf(path, sizeof(path), "%s/%s", dir, ent->d_name);
-
-        if (ent->d_type == DT_DIR) {
-            collect_mxy_files(path, files, count, max);
-        } else if (ends_with(ent->d_name, ".mxy")) {
-            strncpy(files[*count], path, 511);
-            files[*count][511] = '\0';
-            (*count)++;
-        }
-    }
-
-    closedir(d);
-}
 
 static MoxyConfig load_config_for(const char *filepath) {
     char filedir[512];
@@ -507,7 +505,7 @@ static int cmd_fmt(int argc, char **argv) {
     }
 
     if (nfiles == 0) {
-        collect_mxy_files(".", files, &nfiles, 256);
+        collect_files(".", ".mxy", files, &nfiles, 256);
     }
 
     if (nfiles == 0) {
@@ -558,7 +556,7 @@ static int cmd_lint(int argc, char **argv) {
     }
 
     if (nfiles == 0) {
-        collect_mxy_files(".", files, &nfiles, 256);
+        collect_files(".", ".mxy", files, &nfiles, 256);
     }
 
     if (nfiles == 0) {
@@ -577,7 +575,7 @@ static int cmd_lint(int argc, char **argv) {
         Lexer lexer;
         lexer_init(&lexer, src);
 
-        Token tokens[4096];
+        Token tokens[16384];
         int ntokens = 0;
         for (;;) {
             tokens[ntokens] = lexer_next(&lexer);

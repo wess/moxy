@@ -18,4 +18,12 @@ MoxyConfig config_defaults(void);
 MoxyConfig config_load(const char *path);
 char *config_find(const char *start_dir, const char *file_dir);
 
+typedef struct {
+    char cflags[512];
+    char ldflags[512];
+} GooseBuild;
+
+GooseBuild goose_load(const char *path);
+char *goose_find(const char *file_dir);
+
 #endif

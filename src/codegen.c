@@ -5,7 +5,7 @@
 #include <string.h>
 #include <stdlib.h>
 
-static char out[131072];
+static char out[262144];
 static int outpos;
 static int indent;
 
@@ -19,6 +19,7 @@ static int nenums;
 
 static char type_insts[32][64];
 static int ninsts;
+static int in_main;
 
 static char user_includes[64][256];
 static int nuser_includes;
@@ -56,8 +57,11 @@ static void emitln(const char *fmt, ...) {
 }
 
 static void sym_add(const char *name, const char *type) {
-    strcpy(syms[nsyms].name, name);
-    strcpy(syms[nsyms].type, type);
+    if (nsyms >= 256) return;
+    strncpy(syms[nsyms].name, name, 63);
+    syms[nsyms].name[63] = '\0';
+    strncpy(syms[nsyms].type, type, 63);
+    syms[nsyms].type[63] = '\0';
     nsyms++;
 }
 
@@ -70,12 +74,16 @@ static const char *sym_type(const char *name) {
 static void inst_add(const char *type) {
     for (int i = 0; i < ninsts; i++)
         if (strcmp(type_insts[i], type) == 0) return;
-    strcpy(type_insts[ninsts++], type);
+    if (ninsts >= 32) return;
+    strncpy(type_insts[ninsts], type, 63);
+    type_insts[ninsts][63] = '\0';
+    ninsts++;
 }
 
 void codegen_add_include(const char *line) {
     for (int i = 0; i < nuser_includes; i++)
         if (strcmp(user_includes[i], line) == 0) return;
+    if (nuser_includes >= 64) return;
     strncpy(user_includes[nuser_includes], line, 255);
     user_includes[nuser_includes][255] = '\0';
     nuser_includes++;
@@ -86,6 +94,11 @@ void codegen_add_directive(const char *line) {
     strncpy(user_directives[nuser_directives], line, 511);
     user_directives[nuser_directives][511] = '\0';
     nuser_directives++;
+}
+
+void codegen_reset_includes(void) {
+    nuser_includes = 0;
+    nuser_directives = 0;
 }
 
 static int is_list_type(const char *t) {
@@ -363,14 +376,14 @@ static void emit_list_type(const char *mxy_type) {
     c_type_buf(elem, celem);
     c_type_buf(mxy_type, tname);
 
-    if (moxy_arc_enabled) {
-        emit("typedef struct {\n");
-        emit("    int _rc;\n");
-        emit("    %s *data;\n", celem);
-        emit("    int len;\n");
-        emit("    int cap;\n");
-        emit("} %s;\n\n", tname);
+    emit("typedef struct {\n");
+    if (moxy_arc_enabled) emit("    int _rc;\n");
+    emit("    %s *data;\n", celem);
+    emit("    int len;\n");
+    emit("    int cap;\n");
+    emit("} %s;\n\n", tname);
 
+    if (moxy_arc_enabled) {
         emit("static %s *%s_make(%s *init, int n) {\n", tname, tname, celem);
         emit("    %s *l = (%s *)malloc(sizeof(%s));\n", tname, tname, tname);
         emit("    l->_rc = 1;\n");
@@ -380,26 +393,7 @@ static void emit_list_type(const char *mxy_type) {
         emit("    if (n > 0) memcpy(l->data, init, n * sizeof(%s));\n", celem);
         emit("    return l;\n");
         emit("}\n\n");
-
-        emit("static void %s_push(%s *l, %s val) {\n", tname, tname, celem);
-        emit("    if (l->len >= l->cap) {\n");
-        emit("        l->cap = l->cap < 8 ? 8 : l->cap * 2;\n");
-        emit("        l->data = (%s*)realloc(l->data, l->cap * sizeof(%s));\n", celem, celem);
-        emit("    }\n");
-        emit("    l->data[l->len++] = val;\n");
-        emit("}\n\n");
-
-        emit("static void %s_retain(%s *l) { if (l) l->_rc++; }\n", tname, tname);
-        emit("static void %s_release(%s *l) {\n", tname, tname);
-        emit("    if (l && --l->_rc == 0) { free(l->data); free(l); }\n");
-        emit("}\n\n");
     } else {
-        emit("typedef struct {\n");
-        emit("    %s *data;\n", celem);
-        emit("    int len;\n");
-        emit("    int cap;\n");
-        emit("} %s;\n\n", tname);
-
         emit("static %s %s_make(%s *init, int n) {\n", tname, tname, celem);
         emit("    %s l;\n", tname);
         emit("    l.cap = n < 8 ? 8 : n;\n");
@@ -408,13 +402,20 @@ static void emit_list_type(const char *mxy_type) {
         emit("    if (n > 0) memcpy(l.data, init, n * sizeof(%s));\n", celem);
         emit("    return l;\n");
         emit("}\n\n");
+    }
 
-        emit("static void %s_push(%s *l, %s val) {\n", tname, tname, celem);
-        emit("    if (l->len >= l->cap) {\n");
-        emit("        l->cap = l->cap < 8 ? 8 : l->cap * 2;\n");
-        emit("        l->data = (%s*)realloc(l->data, l->cap * sizeof(%s));\n", celem, celem);
-        emit("    }\n");
-        emit("    l->data[l->len++] = val;\n");
+    emit("static void %s_push(%s *l, %s val) {\n", tname, tname, celem);
+    emit("    if (l->len >= l->cap) {\n");
+    emit("        l->cap = l->cap < 8 ? 8 : l->cap * 2;\n");
+    emit("        l->data = (%s*)realloc(l->data, l->cap * sizeof(%s));\n", celem, celem);
+    emit("    }\n");
+    emit("    l->data[l->len++] = val;\n");
+    emit("}\n\n");
+
+    if (moxy_arc_enabled) {
+        emit("static void %s_retain(%s *l) { if (l) l->_rc++; }\n", tname, tname);
+        emit("static void %s_release(%s *l) {\n", tname, tname);
+        emit("    if (l && --l->_rc == 0) { free(l->data); free(l); }\n");
         emit("}\n\n");
     }
 }
@@ -456,14 +457,14 @@ static void emit_map_type(const char *mxy_type) {
 
     int key_is_str = (strcmp(k, "string") == 0);
 
-    if (moxy_arc_enabled) {
-        emit("typedef struct {\n");
-        emit("    int _rc;\n");
-        emit("    struct { %s key; %s val; } *entries;\n", ck, cv);
-        emit("    int len;\n");
-        emit("    int cap;\n");
-        emit("} %s;\n\n", tname);
+    emit("typedef struct {\n");
+    if (moxy_arc_enabled) emit("    int _rc;\n");
+    emit("    struct { %s key; %s val; } *entries;\n", ck, cv);
+    emit("    int len;\n");
+    emit("    int cap;\n");
+    emit("} %s;\n\n", tname);
 
+    if (moxy_arc_enabled) {
         emit("static %s *%s_make(void) {\n", tname, tname);
         emit("    %s *m = (%s *)malloc(sizeof(%s));\n", tname, tname, tname);
         emit("    m->_rc = 1;\n");
@@ -472,45 +473,7 @@ static void emit_map_type(const char *mxy_type) {
         emit("    m->len = 0;\n");
         emit("    return m;\n");
         emit("}\n\n");
-
-        const char *cmp = key_is_str ? "strcmp(m->entries[i].key, key) == 0" : "m->entries[i].key == key";
-
-        emit("static void %s_set(%s *m, %s key, %s val) {\n", tname, tname, ck, cv);
-        emit("    for (int i = 0; i < m->len; i++) {\n");
-        emit("        if (%s) { m->entries[i].val = val; return; }\n", cmp);
-        emit("    }\n");
-        emit("    if (m->len >= m->cap) {\n");
-        emit("        m->cap *= 2;\n");
-        emit("        m->entries = realloc(m->entries, m->cap * sizeof(*m->entries));\n");
-        emit("    }\n");
-        emit("    m->entries[m->len].key = key;\n");
-        emit("    m->entries[m->len].val = val;\n");
-        emit("    m->len++;\n");
-        emit("}\n\n");
-
-        emit("static %s %s_get(%s *m, %s key) {\n", cv, tname, tname, ck);
-        emit("    for (int i = 0; i < m->len; i++)\n");
-        emit("        if (%s) return m->entries[i].val;\n", cmp);
-        emit("    return (%s){0};\n", cv);
-        emit("}\n\n");
-
-        emit("static bool %s_has(%s *m, %s key) {\n", tname, tname, ck);
-        emit("    for (int i = 0; i < m->len; i++)\n");
-        emit("        if (%s) return true;\n", cmp);
-        emit("    return false;\n");
-        emit("}\n\n");
-
-        emit("static void %s_retain(%s *m) { if (m) m->_rc++; }\n", tname, tname);
-        emit("static void %s_release(%s *m) {\n", tname, tname);
-        emit("    if (m && --m->_rc == 0) { free(m->entries); free(m); }\n");
-        emit("}\n\n");
     } else {
-        emit("typedef struct {\n");
-        emit("    struct { %s key; %s val; } *entries;\n", ck, cv);
-        emit("    int len;\n");
-        emit("    int cap;\n");
-        emit("} %s;\n\n", tname);
-
         emit("static %s %s_make(void) {\n", tname, tname);
         emit("    %s m;\n", tname);
         emit("    m.cap = 8;\n");
@@ -518,32 +481,39 @@ static void emit_map_type(const char *mxy_type) {
         emit("    m.len = 0;\n");
         emit("    return m;\n");
         emit("}\n\n");
+    }
 
-        const char *cmp = key_is_str ? "strcmp(m->entries[i].key, key) == 0" : "m->entries[i].key == key";
+    const char *cmp = key_is_str ? "strcmp(m->entries[i].key, key) == 0" : "m->entries[i].key == key";
 
-        emit("static void %s_set(%s *m, %s key, %s val) {\n", tname, tname, ck, cv);
-        emit("    for (int i = 0; i < m->len; i++) {\n");
-        emit("        if (%s) { m->entries[i].val = val; return; }\n", cmp);
-        emit("    }\n");
-        emit("    if (m->len >= m->cap) {\n");
-        emit("        m->cap *= 2;\n");
-        emit("        m->entries = realloc(m->entries, m->cap * sizeof(*m->entries));\n");
-        emit("    }\n");
-        emit("    m->entries[m->len].key = key;\n");
-        emit("    m->entries[m->len].val = val;\n");
-        emit("    m->len++;\n");
-        emit("}\n\n");
+    emit("static void %s_set(%s *m, %s key, %s val) {\n", tname, tname, ck, cv);
+    emit("    for (int i = 0; i < m->len; i++) {\n");
+    emit("        if (%s) { m->entries[i].val = val; return; }\n", cmp);
+    emit("    }\n");
+    emit("    if (m->len >= m->cap) {\n");
+    emit("        m->cap *= 2;\n");
+    emit("        m->entries = realloc(m->entries, m->cap * sizeof(*m->entries));\n");
+    emit("    }\n");
+    emit("    m->entries[m->len].key = key;\n");
+    emit("    m->entries[m->len].val = val;\n");
+    emit("    m->len++;\n");
+    emit("}\n\n");
 
-        emit("static %s %s_get(%s *m, %s key) {\n", cv, tname, tname, ck);
-        emit("    for (int i = 0; i < m->len; i++)\n");
-        emit("        if (%s) return m->entries[i].val;\n", cmp);
-        emit("    return (%s){0};\n", cv);
-        emit("}\n\n");
+    emit("static %s %s_get(%s *m, %s key) {\n", cv, tname, tname, ck);
+    emit("    for (int i = 0; i < m->len; i++)\n");
+    emit("        if (%s) return m->entries[i].val;\n", cmp);
+    emit("    return (%s){0};\n", cv);
+    emit("}\n\n");
 
-        emit("static bool %s_has(%s *m, %s key) {\n", tname, tname, ck);
-        emit("    for (int i = 0; i < m->len; i++)\n");
-        emit("        if (%s) return true;\n", cmp);
-        emit("    return false;\n");
+    emit("static bool %s_has(%s *m, %s key) {\n", tname, tname, ck);
+    emit("    for (int i = 0; i < m->len; i++)\n");
+    emit("        if (%s) return true;\n", cmp);
+    emit("    return false;\n");
+    emit("}\n\n");
+
+    if (moxy_arc_enabled) {
+        emit("static void %s_retain(%s *m) { if (m) m->_rc++; }\n", tname, tname);
+        emit("static void %s_release(%s *m) {\n", tname, tname);
+        emit("    if (m && --m->_rc == 0) { free(m->entries); free(m); }\n");
         emit("}\n\n");
     }
 }
@@ -633,11 +603,8 @@ static void gen_expr(Node *n) {
         break;
     case NODE_EXPR_FIELD: {
         const char *ft = infer_type(n->field.target);
-        int arc_deref = (ft && is_arc_type(ft));
         gen_expr(n->field.target);
-        if (n->field.is_arrow)
-            emit("->%s", n->field.name);
-        else if (arc_deref)
+        if (n->field.is_arrow || (ft && is_arc_type(ft)))
             emit("->%s", n->field.name);
         else
             emit(".%s", n->field.name);
@@ -819,30 +786,18 @@ static void gen_var_decl(Node *n, int is_global) {
         char elem[64], celem[64];
         list_elem(mtype, elem);
         c_type_buf(elem, celem);
-        if (is_arc_type(mtype)) {
-            if (lit->list_lit.nitems > 0) {
-                emit("%s *%s = %s_make((%s[]){", ct, n->var_decl.name, ct, celem);
-                for (int i = 0; i < lit->list_lit.nitems; i++) {
-                    if (i > 0) emit(", ");
-                    gen_expr(lit->list_lit.items[i]);
-                }
-                emit("}, %d);\n", lit->list_lit.nitems);
-            } else {
-                emit("%s *%s = %s_make(NULL, 0);\n", ct, n->var_decl.name, ct);
+        int arc = is_arc_type(mtype);
+        if (lit->list_lit.nitems > 0) {
+            emit("%s %s%s = %s_make((%s[]){", ct, arc ? "*" : "", n->var_decl.name, ct, celem);
+            for (int i = 0; i < lit->list_lit.nitems; i++) {
+                if (i > 0) emit(", ");
+                gen_expr(lit->list_lit.items[i]);
             }
-            arc_register_var(n->var_decl.name, mtype);
+            emit("}, %d);\n", lit->list_lit.nitems);
         } else {
-            if (lit->list_lit.nitems > 0) {
-                emit("%s %s = %s_make((%s[]){", ct, n->var_decl.name, ct, celem);
-                for (int i = 0; i < lit->list_lit.nitems; i++) {
-                    if (i > 0) emit(", ");
-                    gen_expr(lit->list_lit.items[i]);
-                }
-                emit("}, %d);\n", lit->list_lit.nitems);
-            } else {
-                emit("%s %s = %s_make(NULL, 0);\n", ct, n->var_decl.name, ct);
-            }
+            emit("%s %s%s = %s_make(NULL, 0);\n", ct, arc ? "*" : "", n->var_decl.name, ct);
         }
+        if (arc) arc_register_var(n->var_decl.name, mtype);
         return;
     }
 
@@ -1106,6 +1061,8 @@ static void gen_return(Node *n) {
         emit("return ");
         gen_expr(n->return_stmt.value);
         emit(";\n");
+    } else if (in_main) {
+        emit("return 0;\n");
     } else {
         emit("return;\n");
     }
@@ -1211,7 +1168,9 @@ static void gen_stmt(Node *n) {
 }
 
 static void gen_enum(Node *n) {
-    strcpy(enums[nenums].name, n->enum_decl.name);
+    if (nenums >= 16) return;
+    strncpy(enums[nenums].name, n->enum_decl.name, 63);
+    enums[nenums].name[63] = '\0';
     enums[nenums].nvariants = n->enum_decl.nvariants;
     for (int i = 0; i < n->enum_decl.nvariants; i++)
         enums[nenums].variants[i] = n->enum_decl.variants[i];
@@ -1397,6 +1356,7 @@ static void gen_func(Node *n) {
     char retct[128];
     c_type_buf(n->func_decl.ret, retct);
 
+    in_main = is_main;
     if (is_main) {
         emit("int main(void) {\n");
     } else {
@@ -1501,6 +1461,7 @@ const char *codegen(Node *program) {
     nsyms = 0;
     nenums = 0;
     ninsts = 0;
+    in_main = 0;
     forin_counter = 0;
     async_counter = 0;
     has_futures = 0;

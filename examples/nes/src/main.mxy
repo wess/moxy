@@ -1,0 +1,83 @@
+// NES Emulator written in Moxy
+// Supports mapper 0 (NROM) and mapper 4 (MMC3), no sound
+//
+// Prerequisites:
+//   brew install sdl2
+//
+// Usage:
+//   goose build
+//   NES_ROM=path/to/rom.nes ./build/debug/moxy run examples/nes/main.mxy
+//
+// Controls:
+//   Arrow keys = D-pad
+//   Z = A, X = B
+//   Enter = Start, Right Shift = Select
+//   Escape = Quit
+
+#include "../lib/globals.mxy"
+#include "../lib/palette.mxy"
+#include "../lib/cart.mxy"
+#include "../lib/mapper.mxy"
+#include "../lib/ppubus.mxy"
+#include "../lib/ppu.mxy"
+#include "../lib/bus.mxy"
+#include "../lib/cpu.mxy"
+#include "../lib/render.mxy"
+
+void nes_init() {
+    memset(cpu_ram, 0, 2048);
+    memset(ppu_oam, 0, 256);
+    memset(ppu_vram, 0, 2048);
+    memset(ppu_palette, 0, 32);
+    memset(framebuf, 0, sizeof(framebuf));
+    ppu_scanline = 261;
+    ppu_dot = 0;
+    ppu_frame = 0;
+    ppu_nmi_occurred = 0;
+    ppu_nmi_output = 0;
+    ctrl_state = 0;
+    ctrl_shift = 0;
+    ctrl_strobe = 0;
+    mapper_init();
+}
+
+void main() {
+    string rom_path = getenv("NES_ROM");
+    if (!rom_path) {
+        print("Usage: NES_ROM=path/to/rom.nes moxy run examples/nes/main.mxy");
+        return;
+    }
+
+    if (!cart_load(rom_path)) {
+        return;
+    }
+
+    nes_init();
+    cpu_reset();
+
+    if (!render_init()) {
+        return;
+    }
+
+    print("NES emulator started");
+
+    // Main emulation loop
+    // NES runs at ~29780.5 CPU cycles per frame (NTSC)
+    while (nes_running) {
+        int frame_start = ppu_frame;
+
+        while (ppu_frame == frame_start) {
+            cpu_step();
+
+            // PPU runs 3 dots per CPU cycle
+            for (int p = 0; p < cpu_cycles * 3; p++) {
+                ppu_step();
+            }
+        }
+
+        render_frame();
+        render_input();
+    }
+
+    render_cleanup();
+}

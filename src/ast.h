@@ -77,7 +77,7 @@ struct Node {
     int line;
     int col;
     union {
-        struct { Node *decls[64]; int ndecls; } program;
+        struct { Node *decls[256]; int ndecls; } program;
         struct { char type[64]; char name[64]; Node *value; } var_decl;
         struct { char name[64]; Variant variants[16]; int nvariants; } enum_decl;
         struct { char ret[64]; char name[64]; Param params[16]; int nparams; Node *body[256]; int nbody; } func_decl;

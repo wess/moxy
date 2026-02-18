@@ -1,0 +1,57 @@
+// PPU memory bus
+
+int ppu_mirror_nametable(int addr) {
+    int a = addr & 0x0FFF;
+    if (mirror_mode == 1) {
+        // Vertical mirroring
+        return a & 0x07FF;
+    }
+    // Horizontal mirroring
+    if (a < 0x0800) {
+        return a & 0x03FF;
+    }
+    return 0x0400 + (a & 0x03FF);
+}
+
+u8 ppu_bus_read(u16 addr) {
+    int a = addr & 0x3FFF;
+    if (a < 0x2000) {
+        if (mapper == 4) {
+            return mapper4_chr_read(addr);
+        }
+        // Mapper 0: direct CHR access
+        if (!chr_is_ram && a < chr_size) {
+            return chr_rom_data[a];
+        }
+        return chr_ram[a & 0x1FFF];
+    }
+    if (a < 0x3F00) {
+        // Nametables
+        return ppu_vram[ppu_mirror_nametable(a - 0x2000)];
+    }
+    // Palette
+    int pi = a & 0x1F;
+    if (pi == 0x10 || pi == 0x14 || pi == 0x18 || pi == 0x1C) {
+        pi = pi - 0x10;
+    }
+    return ppu_palette[pi];
+}
+
+void ppu_bus_write(u16 addr, u8 val) {
+    int a = addr & 0x3FFF;
+    if (a < 0x2000) {
+        // CHR-RAM write
+        chr_ram[a & 0x1FFF] = val;
+        return;
+    }
+    if (a < 0x3F00) {
+        ppu_vram[ppu_mirror_nametable(a - 0x2000)] = val;
+        return;
+    }
+    // Palette write
+    int pi = a & 0x1F;
+    if (pi == 0x10 || pi == 0x14 || pi == 0x18 || pi == 0x1C) {
+        pi = pi - 0x10;
+    }
+    ppu_palette[pi] = val;
+}

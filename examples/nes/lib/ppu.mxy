@@ -1,0 +1,272 @@
+// PPU register access and rendering
+
+u8 ppu_reg_read(int reg) {
+    switch (reg) {
+    case 2: { // PPUSTATUS
+        u8 result = ppu_status & 0xE0;
+        result = result | (ppu_data_buf & 0x1F);
+        ppu_status = ppu_status & 0x7F; // clear vblank
+        ppu_nmi_occurred = 0;
+        ppu_w = 0;
+        return result;
+    }
+    case 4: // OAMDATA
+        return ppu_oam[ppu_oamaddr];
+    case 7: { // PPUDATA
+        u8 val = ppu_bus_read(ppu_v);
+        if ((ppu_v & 0x3FFF) < 0x3F00) {
+            u8 buffered = ppu_data_buf;
+            ppu_data_buf = val;
+            val = buffered;
+        } else {
+            ppu_data_buf = ppu_bus_read(ppu_v - 0x1000);
+        }
+        ppu_v = ppu_v + ((ppu_ctrl & 0x04) ? 32 : 1);
+        return val;
+    }
+    }
+    return 0;
+}
+
+void ppu_reg_write(int reg, u8 val) {
+    switch (reg) {
+    case 0: // PPUCTRL
+        ppu_ctrl = val;
+        ppu_nmi_output = (val >> 7) & 1;
+        ppu_t = (ppu_t & 0xF3FF) | (((unsigned short)val & 0x03) << 10);
+        break;
+    case 1: // PPUMASK
+        ppu_mask = val;
+        break;
+    case 3: // OAMADDR
+        ppu_oamaddr = val;
+        break;
+    case 4: // OAMDATA
+        ppu_oam[ppu_oamaddr] = val;
+        ppu_oamaddr++;
+        break;
+    case 5: // PPUSCROLL
+        if (ppu_w == 0) {
+            ppu_t = (ppu_t & 0xFFE0) | ((unsigned short)val >> 3);
+            ppu_x = val & 0x07;
+            ppu_w = 1;
+        } else {
+            ppu_t = (ppu_t & 0x8C1F) | (((unsigned short)val & 0x07) << 12) |
+                    (((unsigned short)val & 0xF8) << 2);
+            ppu_w = 0;
+        }
+        break;
+    case 6: // PPUADDR
+        if (ppu_w == 0) {
+            ppu_t = (ppu_t & 0x00FF) | (((unsigned short)val & 0x3F) << 8);
+            ppu_w = 1;
+        } else {
+            ppu_t = (ppu_t & 0xFF00) | (unsigned short)val;
+            ppu_v = ppu_t;
+            ppu_w = 0;
+        }
+        break;
+    case 7: // PPUDATA
+        ppu_bus_write(ppu_v, val);
+        ppu_v = ppu_v + ((ppu_ctrl & 0x04) ? 32 : 1);
+        break;
+    }
+}
+
+void ppu_render_pixel() {
+    int x = ppu_dot - 1;
+    int y = ppu_scanline;
+    if (x < 0 || x >= 256 || y < 0 || y >= 240) { return; }
+
+    u8 bg_pixel = 0;
+    u8 bg_palette = 0;
+
+    // Background rendering
+    if (ppu_mask & 0x08) {
+        int fine_x = (ppu_x + x) & 0x07;
+        u16 v = ppu_v;
+
+        // Tile address and attribute
+        u16 nt_addr = 0x2000 | (v & 0x0FFF);
+        u8 tile = ppu_bus_read(nt_addr);
+
+        // Pattern table address
+        u16 pt_base = (ppu_ctrl & 0x10) ? 0x1000 : 0x0000;
+        int fine_y = (v >> 12) & 0x07;
+        u16 pt_addr = pt_base + (unsigned short)tile * 16 + fine_y;
+        u8 lo = ppu_bus_read(pt_addr);
+        u8 hi = ppu_bus_read(pt_addr + 8);
+
+        int bit = 7 - fine_x;
+        bg_pixel = ((lo >> bit) & 1) | (((hi >> bit) & 1) << 1);
+
+        // Attribute byte
+        if (bg_pixel != 0) {
+            u16 at_addr = 0x23C0 | (v & 0x0C00) |
+                          ((v >> 4) & 0x38) | ((v >> 2) & 0x07);
+            u8 at = ppu_bus_read(at_addr);
+            int shift = ((v >> 4) & 4) | (v & 2);
+            bg_palette = (at >> shift) & 0x03;
+        }
+    }
+
+    // Sprite rendering
+    u8 spr_pixel = 0;
+    u8 spr_palette = 0;
+    int spr_priority = 0;
+
+    if (ppu_mask & 0x10) {
+        u16 spr_pt_base = (ppu_ctrl & 0x08) ? 0x1000 : 0x0000;
+        int spr_height = (ppu_ctrl & 0x20) ? 16 : 8;
+
+        for (int i = 0; i < 64; i++) {
+            int spr_y = ppu_oam[i * 4] + 1;
+            if (y < spr_y || y >= spr_y + spr_height) { continue; }
+
+            int spr_x = ppu_oam[i * 4 + 3];
+            if (x < spr_x || x >= spr_x + 8) { continue; }
+
+            u8 spr_tile = ppu_oam[i * 4 + 1];
+            u8 spr_attr = ppu_oam[i * 4 + 2];
+            int flip_h = (spr_attr >> 6) & 1;
+            int flip_v = (spr_attr >> 7) & 1;
+
+            int row = y - spr_y;
+            if (flip_v) { row = spr_height - 1 - row; }
+
+            u16 addr;
+            if (spr_height == 16) {
+                u16 base = (spr_tile & 1) ? 0x1000 : 0x0000;
+                u8 t = spr_tile & 0xFE;
+                if (row >= 8) { t++; row -= 8; }
+                addr = base + (unsigned short)t * 16 + row;
+            } else {
+                addr = spr_pt_base + (unsigned short)spr_tile * 16 + row;
+            }
+
+            u8 slo = ppu_bus_read(addr);
+            u8 shi = ppu_bus_read(addr + 8);
+            int col = x - spr_x;
+            if (!flip_h) { col = 7 - col; }
+
+            u8 px = ((slo >> col) & 1) | (((shi >> col) & 1) << 1);
+            if (px != 0) {
+                spr_pixel = px;
+                spr_palette = (spr_attr & 0x03) + 4;
+                spr_priority = (spr_attr >> 5) & 1;
+
+                // Sprite 0 hit
+                if (i == 0 && bg_pixel != 0 && x < 255) {
+                    ppu_status = ppu_status | 0x40;
+                }
+                break;
+            }
+        }
+    }
+
+    // Pixel priority
+    u8 color_index = 0;
+    if (bg_pixel == 0 && spr_pixel == 0) {
+        color_index = ppu_palette[0];
+    } else if (bg_pixel == 0) {
+        color_index = ppu_palette[spr_palette * 4 + spr_pixel];
+    } else if (spr_pixel == 0 || spr_priority == 1) {
+        color_index = ppu_palette[bg_palette * 4 + bg_pixel];
+    } else {
+        color_index = ppu_palette[spr_palette * 4 + spr_pixel];
+    }
+
+    framebuf[y * 256 + x] = nes_palette[color_index & 0x3F];
+}
+
+void ppu_increment_x() {
+    if ((ppu_v & 0x001F) == 31) {
+        ppu_v = ppu_v & (~0x001F);
+        ppu_v = ppu_v ^ 0x0400;
+    } else {
+        ppu_v++;
+    }
+}
+
+void ppu_increment_y() {
+    if ((ppu_v & 0x7000) != 0x7000) {
+        ppu_v = ppu_v + 0x1000;
+    } else {
+        ppu_v = ppu_v & (~0x7000);
+        int y = (ppu_v & 0x03E0) >> 5;
+        if (y == 29) {
+            y = 0;
+            ppu_v = ppu_v ^ 0x0800;
+        } else if (y == 31) {
+            y = 0;
+        } else {
+            y++;
+        }
+        ppu_v = (ppu_v & (~0x03E0)) | (y << 5);
+    }
+}
+
+void ppu_copy_x() {
+    ppu_v = (ppu_v & 0xFBE0) | (ppu_t & 0x041F);
+}
+
+void ppu_copy_y() {
+    ppu_v = (ppu_v & 0x841F) | (ppu_t & 0x7BE0);
+}
+
+void ppu_step() {
+    int rendering = (ppu_mask & 0x18) != 0;
+
+    // Pre-render scanline
+    if (ppu_scanline == 261) {
+        if (ppu_dot == 1) {
+            ppu_status = ppu_status & 0x1F; // clear vblank, sprite 0, overflow
+            ppu_nmi_occurred = 0;
+        }
+        if (rendering && ppu_dot >= 280 && ppu_dot <= 304) {
+            ppu_copy_y();
+        }
+    }
+
+    // Visible scanlines
+    if (ppu_scanline < 240 && rendering) {
+        if (ppu_dot >= 1 && ppu_dot <= 256) {
+            ppu_render_pixel();
+            if (ppu_dot % 8 == 0) {
+                ppu_increment_x();
+            }
+        }
+        if (ppu_dot == 256) {
+            ppu_increment_y();
+        }
+        if (ppu_dot == 257) {
+            ppu_copy_x();
+        }
+        // MMC3 scanline counter (A12 rising edge at dot 260)
+        if (ppu_dot == 260) {
+            mapper_scanline();
+        }
+    }
+
+    // Also tick scanline counter on pre-render line
+    if (ppu_scanline == 261 && rendering && ppu_dot == 260) {
+        mapper_scanline();
+    }
+
+    // Vblank
+    if (ppu_scanline == 241 && ppu_dot == 1) {
+        ppu_nmi_occurred = 1;
+        ppu_status = ppu_status | 0x80;
+    }
+
+    // Advance dot/scanline
+    ppu_dot++;
+    if (ppu_dot > 340) {
+        ppu_dot = 0;
+        ppu_scanline++;
+        if (ppu_scanline > 261) {
+            ppu_scanline = 0;
+            ppu_frame++;
+        }
+    }
+}

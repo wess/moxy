@@ -1,0 +1,94 @@
+// NES Emulator - Global state
+// All memory and register state lives here as globals
+
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <SDL2/SDL.h>
+
+typedef unsigned char u8;
+typedef unsigned short u16;
+typedef unsigned int u32;
+
+// CPU registers
+u8 cpu_a;
+u8 cpu_x;
+u8 cpu_y;
+u8 cpu_sp;
+u16 cpu_pc;
+u8 cpu_p; // NV-BDIZC
+int cpu_cycles;
+int cpu_total_cycles;
+int cpu_stall;
+
+// CPU status flag bits
+#define FLAG_C 0x01
+#define FLAG_Z 0x02
+#define FLAG_I 0x04
+#define FLAG_D 0x08
+#define FLAG_B 0x10
+#define FLAG_U 0x20
+#define FLAG_V 0x40
+#define FLAG_N 0x80
+
+// CPU memory
+u8 cpu_ram[2048];
+
+// PPU registers
+u8 ppu_ctrl;
+u8 ppu_mask;
+u8 ppu_status;
+u8 ppu_oamaddr;
+u16 ppu_v;    // current VRAM address (15 bits)
+u16 ppu_t;    // temporary VRAM address
+u8 ppu_x;    // fine X scroll (3 bits)
+u8 ppu_w;    // write toggle
+u8 ppu_data_buf;
+
+// PPU memory
+u8 ppu_oam[256];
+u8 ppu_vram[2048];
+u8 ppu_palette[32];
+
+// PPU rendering state
+int ppu_scanline;
+int ppu_dot;
+int ppu_frame;
+int ppu_nmi_occurred;
+int ppu_nmi_output;
+int ppu_nmi_delay;
+
+// Cartridge
+u8 prg_rom_data[524288]; // max 512KB PRG
+u8 chr_rom_data[262144]; // max 256KB CHR
+u8 chr_ram[8192];        // 8KB CHR-RAM for mapper 0 w/o CHR-ROM
+int prg_size;
+int chr_size;
+int chr_is_ram;
+int mapper;
+int mirror_mode; // 0=horizontal, 1=vertical
+
+// MMC3 (mapper 4) state
+u8 mmc3_bank_select;
+u8 mmc3_banks[8];
+u8 mmc3_prg_mode;
+u8 mmc3_chr_mode;
+u8 mmc3_irq_latch;
+u8 mmc3_irq_counter;
+int mmc3_irq_enabled;
+int mmc3_irq_reload;
+int mmc3_irq_pending;
+
+// Framebuffer (ARGB)
+u32 framebuf[61440]; // 256 * 240
+
+// Controller
+u8 ctrl_state;
+u8 ctrl_shift;
+u8 ctrl_strobe;
+
+// SDL
+SDL_Window *nes_window;
+SDL_Renderer *nes_renderer;
+SDL_Texture *nes_texture;
+int nes_running;

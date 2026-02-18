@@ -1267,11 +1267,7 @@ static Node *parse_stmt(void) {
                 return collect_raw_stmt();
             }
 
-            if (after == TOK_LPAREN) {
-                pos = save;
-            } else {
-                pos = save;
-            }
+            pos = save;
         } else {
             pos = save;
         }
