@@ -1,8 +1,8 @@
 class Moxy < Formula
   desc "Lightweight superset of C that transpiles to portable C11"
   homepage "https://github.com/wess/moxy"
-  url "https://github.com/wess/moxy/archive/refs/tags/v0.1.1.tar.gz"
-  sha256 "PLACEHOLDER"
+  url "https://github.com/wess/moxy/archive/refs/tags/v0.1.4.tar.gz"
+  sha256 "05db70951fb535bff074bdf5c6fb7020effd87f527211b2a4ef629d2cf94c371"
   license "MIT"
 
   head "https://github.com/wess/moxy.git", branch: "main"
