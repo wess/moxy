@@ -12,7 +12,7 @@ permissions:
 env:
   CFLAGS_COMMON: "-Wall -Wextra -std=c11 -O2"
   INCLUDES: "-Isrc -Ilibs/goose/src -Ilibs/goose/libs/libyaml/include"
-  YAML_DEFS: "-DYAML_VERSION_MAJOR=0 -DYAML_VERSION_MINOR=2 -DYAML_VERSION_PATCH=5 -DYAML_VERSION_STRING='\"0.2.5\"'"
+  YAML_DEFS: '-DYAML_VERSION_MAJOR=0 -DYAML_VERSION_MINOR=2 -DYAML_VERSION_PATCH=5 -DYAML_VERSION_STRING="0.2.5"'
   GOOSE_SRC: "libs/goose/src/build.c libs/goose/src/config.c libs/goose/src/fs.c libs/goose/src/lock.c libs/goose/src/pkg.c libs/goose/src/cmake.c libs/goose/src/cmd/*.c"
   YAML_SRC: "libs/goose/libs/libyaml/src/*.c"
 
