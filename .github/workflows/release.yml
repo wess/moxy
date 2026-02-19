@@ -346,6 +346,8 @@ jobs:
     needs: [prepare, build-linux-amd64, build-linux-arm64, build-linux-static, build-macos-amd64, build-macos-arm64, package-deb, package-rpm, package-arch, installer-script]
     if: ${{ !cancelled() && needs.prepare.result == 'success' }}
     runs-on: ubuntu-latest
+    outputs:
+      released: ${{ steps.create.outcome == 'success' }}
     steps:
       - uses: actions/checkout@v4
 
@@ -372,6 +374,7 @@ jobs:
         run: sha256sum * > checksums.txt
 
       - name: Create release
+        id: create
         env:
           GH_TOKEN: ${{ github.token }}
           VERSION: ${{ needs.prepare.outputs.version }}
@@ -380,3 +383,33 @@ jobs:
             --title "Moxy v${VERSION}" \
             --generate-notes \
             release/*
+
+  update-homebrew:
+    needs: [prepare, release]
+    if: ${{ needs.release.outputs.released }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+
+      - name: Update Homebrew formula
+        env:
+          VERSION: ${{ needs.prepare.outputs.version }}
+        run: |
+          TARBALL_URL="https://github.com/wess/moxy/archive/refs/tags/v${VERSION}.tar.gz"
+          SHA256=$(curl -fsSL "${TARBALL_URL}" | sha256sum | awk '{print $1}')
+
+          sed -i "s|url \".*\"|url \"${TARBALL_URL}\"|" Formula/moxy.rb
+          sed -i "s|sha256 \".*\"|sha256 \"${SHA256}\"|" Formula/moxy.rb
+
+      - name: Commit updated formula
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add Formula/moxy.rb
+          git diff --cached --quiet && exit 0
+          git commit -m "Update Homebrew formula to v$(tr -d '[:space:]' < VERSION)"
+          git push

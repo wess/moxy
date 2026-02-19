@@ -3,10 +3,23 @@ set -euo pipefail
 
 REPO="wess/moxy"
 
-versions=$(
-  gh api "repos/${REPO}/releases" --paginate --jq '.[].tag_name' 2>/dev/null \
-  || curl -fsSL "https://api.github.com/repos/${REPO}/releases" \
-       | grep '"tag_name"' | sed 's/.*"v\(.*\)".*/\1/' | sort -V
-)
+versions=""
 
-echo "${versions}" | sed 's/^v//' | tr '\n' ' '
+if command -v gh >/dev/null 2>&1; then
+  versions=$(
+    gh api "repos/${REPO}/releases" --paginate --jq '.[].tag_name' 2>/dev/null
+  )
+else
+  page=1
+  while true; do
+    page_data=$(
+      curl -fsSL "https://api.github.com/repos/${REPO}/releases?per_page=100&page=${page}" 2>/dev/null
+    )
+    page_tags=$(echo "${page_data}" | grep '"tag_name"' | sed 's/.*"v\(.*\)".*/\1/')
+    [ -z "${page_tags}" ] && break
+    versions="${versions}${versions:+$'\n'}${page_tags}"
+    page=$((page + 1))
+  done
+fi
+
+echo "${versions}" | sed 's/^v//' | sort -V | tr '\n' ' '

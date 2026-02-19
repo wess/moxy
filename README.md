@@ -43,6 +43,13 @@ Or set a custom install directory:
 INSTALL_DIR=~/.local/bin curl -fsSL https://github.com/wess/moxy/releases/latest/download/install.sh | sh
 ```
 
+### Homebrew (macOS)
+
+```sh
+brew tap wess/moxy https://github.com/wess/moxy
+brew install moxy
+```
+
 ### Debian / Ubuntu
 
 ```sh
@@ -92,6 +99,7 @@ The binary is at `./build/debug/moxy`.
 |----------|-------------|--------|
 | macOS | Intel (amd64) | tar.gz |
 | macOS | Apple Silicon (arm64) | tar.gz |
+| macOS | Intel + Apple Silicon | Homebrew |
 | Linux | amd64 | tar.gz |
 | Linux | arm64 | tar.gz |
 | Linux | amd64 (static/musl) | tar.gz |
