@@ -8,8 +8,18 @@ class Moxy < Formula
   head "https://github.com/wess/moxy.git", branch: "main"
 
   def install
-    system ENV.cc, "-Wall", "-Wextra", "-std=c11", "-O2", "-Isrc",
-           *Dir["src/*.c"], "-o", "moxy"
+    system "git", "submodule", "update", "--init", "--recursive" if build.head?
+
+    goose_src = %w[build config fs lock pkg cmake].map { |f| "libs/goose/src/#{f}.c" }
+    goose_cmd = Dir["libs/goose/src/cmd/*.c"]
+    yaml_src = Dir["libs/goose/libs/libyaml/src/*.c"]
+
+    system ENV.cc, "-Wall", "-Wextra", "-std=c11", "-O2",
+           "-Isrc", "-Ilibs/goose/src", "-Ilibs/goose/libs/libyaml/include",
+           "-DYAML_VERSION_MAJOR=0", "-DYAML_VERSION_MINOR=2",
+           "-DYAML_VERSION_PATCH=5", '-DYAML_VERSION_STRING="0.2.5"',
+           *Dir["src/*.c"], *goose_src, *goose_cmd, *yaml_src,
+           "-o", "moxy"
     bin.install "moxy"
   end
 

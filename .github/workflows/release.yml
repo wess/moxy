@@ -9,6 +9,13 @@ on:
 permissions:
   contents: write
 
+env:
+  CFLAGS_COMMON: "-Wall -Wextra -std=c11 -O2"
+  INCLUDES: "-Isrc -Ilibs/goose/src -Ilibs/goose/libs/libyaml/include"
+  YAML_DEFS: "-DYAML_VERSION_MAJOR=0 -DYAML_VERSION_MINOR=2 -DYAML_VERSION_PATCH=5 -DYAML_VERSION_STRING='\"0.2.5\"'"
+  GOOSE_SRC: "libs/goose/src/build.c libs/goose/src/config.c libs/goose/src/fs.c libs/goose/src/lock.c libs/goose/src/pkg.c libs/goose/src/cmake.c libs/goose/src/cmd/*.c"
+  YAML_SRC: "libs/goose/libs/libyaml/src/*.c"
+
 jobs:
   prepare:
     runs-on: ubuntu-latest
@@ -24,8 +31,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          submodules: recursive
       - name: Build
-        run: gcc -Wall -Wextra -std=c11 -O2 -Isrc src/*.c -o moxy
+        run: gcc $CFLAGS_COMMON $INCLUDES $YAML_DEFS src/*.c $GOOSE_SRC $YAML_SRC -o moxy
       - name: Smoke test
         run: ./moxy 2>&1 || true
       - name: Package
@@ -42,10 +51,12 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          submodules: recursive
       - name: Install cross-compiler
         run: sudo apt-get update && sudo apt-get install -y gcc-aarch64-linux-gnu
       - name: Build
-        run: aarch64-linux-gnu-gcc -Wall -Wextra -std=c11 -O2 -Isrc src/*.c -o moxy
+        run: aarch64-linux-gnu-gcc $CFLAGS_COMMON $INCLUDES $YAML_DEFS src/*.c $GOOSE_SRC $YAML_SRC -o moxy
       - name: Package
         run: |
           mkdir -p dist
@@ -60,10 +71,12 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          submodules: recursive
       - name: Install musl
         run: sudo apt-get update && sudo apt-get install -y musl-tools
       - name: Build
-        run: musl-gcc -Wall -Wextra -std=c11 -O2 -static -Isrc src/*.c -o moxy
+        run: musl-gcc $CFLAGS_COMMON -static $INCLUDES $YAML_DEFS src/*.c $GOOSE_SRC $YAML_SRC -o moxy
       - name: Smoke test
         run: ./moxy 2>&1 || true
       - name: Package
@@ -80,8 +93,10 @@ jobs:
     runs-on: macos-14
     steps:
       - uses: actions/checkout@v4
+        with:
+          submodules: recursive
       - name: Build
-        run: cc -Wall -Wextra -std=c11 -O2 -Isrc src/*.c -target x86_64-apple-macos12 -o moxy
+        run: cc $CFLAGS_COMMON $INCLUDES $YAML_DEFS -target x86_64-apple-macos12 src/*.c $GOOSE_SRC $YAML_SRC -o moxy
       - name: Package
         run: |
           mkdir -p dist
@@ -96,8 +111,10 @@ jobs:
     runs-on: macos-14
     steps:
       - uses: actions/checkout@v4
+        with:
+          submodules: recursive
       - name: Build
-        run: cc -Wall -Wextra -std=c11 -O2 -Isrc src/*.c -o moxy
+        run: cc $CFLAGS_COMMON $INCLUDES $YAML_DEFS src/*.c $GOOSE_SRC $YAML_SRC -o moxy
       - name: Smoke test
         run: ./moxy 2>&1 || true
       - name: Package
@@ -238,13 +255,26 @@ jobs:
           url="https://github.com/wess/moxy"
           license=('MIT')
           depends=('glibc')
-          makedepends=('gcc')
+          makedepends=('gcc' 'git')
           source=("${url}/archive/v${pkgver}.tar.gz")
           sha256sums=('SKIP')
 
+          prepare() {
+            cd "${pkgname}-${pkgver}"
+            git submodule update --init --recursive 2>/dev/null || true
+          }
+
           build() {
             cd "${pkgname}-${pkgver}"
-            cc -Wall -Wextra -std=c11 -O2 -Isrc src/*.c -o moxy
+            cc -Wall -Wextra -std=c11 -O2 \
+              -Isrc -Ilibs/goose/src -Ilibs/goose/libs/libyaml/include \
+              -DYAML_VERSION_MAJOR=0 -DYAML_VERSION_MINOR=2 -DYAML_VERSION_PATCH=5 -DYAML_VERSION_STRING='"0.2.5"' \
+              src/*.c \
+              libs/goose/src/build.c libs/goose/src/config.c libs/goose/src/fs.c \
+              libs/goose/src/lock.c libs/goose/src/pkg.c libs/goose/src/cmake.c \
+              libs/goose/src/cmd/*.c \
+              libs/goose/libs/libyaml/src/*.c \
+              -o moxy
           }
 
           package() {
