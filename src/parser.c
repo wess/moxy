@@ -381,10 +381,86 @@ static const char *binop_str(TokenKind k) {
     }
 }
 
+static Node *parse_lambda_body(Node *n) {
+    if (peek().kind == TOK_LBRACE) {
+        advance();
+        Node *block = node_new(NODE_BLOCK);
+        block->line = peek().line;
+        block->col = peek().col;
+        block->block.nstmts = 0;
+        while (peek().kind != TOK_RBRACE)
+            block->block.stmts[block->block.nstmts++] = parse_stmt();
+        eat(TOK_RBRACE);
+        n->lambda.body = block;
+        n->lambda.is_expr = 0;
+    } else {
+        n->lambda.body = parse_expr();
+        n->lambda.is_expr = 1;
+    }
+    return n;
+}
+
+static Node *try_parse_lambda(void) {
+    int save = pos;
+    Token t = toks[pos];
+    advance(); /* skip ( */
+
+    /* () => ... */
+    if (peek().kind == TOK_RPAREN && toks[pos + 1].kind == TOK_FATARROW) {
+        advance(); /* skip ) */
+        advance(); /* skip => */
+        Node *n = node_new(NODE_EXPR_LAMBDA);
+        n->line = t.line;
+        n->col = t.col;
+        n->lambda.nparams = 0;
+        n->lambda.id = 0;
+        return parse_lambda_body(n);
+    }
+
+    /* Try (type name [, type name]*) => ... */
+    Param params[16];
+    int nparams = 0;
+
+    while (1) {
+        if (!is_type_start(peek())) { pos = save; return NULL; }
+        char type[64];
+        parse_type(type);
+        if (peek().kind != TOK_IDENT) { pos = save; return NULL; }
+        Token name = advance();
+        strcpy(params[nparams].type, type);
+        strcpy(params[nparams].name, name.text);
+        nparams++;
+
+        if (peek().kind == TOK_COMMA) {
+            advance();
+            continue;
+        }
+        break;
+    }
+
+    if (peek().kind != TOK_RPAREN) { pos = save; return NULL; }
+    advance(); /* skip ) */
+    if (peek().kind != TOK_FATARROW) { pos = save; return NULL; }
+    advance(); /* skip => */
+
+    Node *n = node_new(NODE_EXPR_LAMBDA);
+    n->line = t.line;
+    n->col = t.col;
+    n->lambda.nparams = nparams;
+    n->lambda.id = 0;
+    for (int i = 0; i < nparams; i++)
+        n->lambda.params[i] = params[i];
+    return parse_lambda_body(n);
+}
+
 static Node *parse_primary(void) {
     Token t = peek();
 
     if (t.kind == TOK_LPAREN) {
+        /* Try lambda first */
+        Node *lam = try_parse_lambda();
+        if (lam) return lam;
+
         if (is_c_type_keyword(toks[pos + 1])) {
             int save = pos;
             advance();
@@ -661,7 +737,7 @@ static Node *parse_primary(void) {
                      strcmp(t.text, "val") == 0)
                 diag_hint("moxy uses C-style declarations: int x = 42;");
         } else if (t.kind == TOK_FATARROW) {
-            diag_hint("'=>' can only be used inside match arms");
+            diag_hint("'=>' is used in match arms and lambda expressions");
         } else if (t.kind == TOK_EOF) {
             diag_hint("unexpected end of file — check for missing '}'");
         }
@@ -1364,8 +1440,29 @@ static Node *parse_func(const char *ret, const char *fname) {
             Param *p = &n->func_decl.params[n->func_decl.nparams++];
             char ptype[64];
             parse_type(ptype);
-            strcpy(p->type, ptype);
             Token pname = eat(TOK_IDENT);
+
+            if (peek().kind == TOK_LPAREN) {
+                /* function pointer param: int fn(int) -> store as "int(*)(int)" */
+                advance(); /* skip ( */
+                char fptype[64];
+                int fp = 0;
+                fp += snprintf(fptype + fp, 64 - fp, "%s(*)(", ptype);
+                int first = 1;
+                while (peek().kind != TOK_RPAREN) {
+                    if (!first) fp += snprintf(fptype + fp, 64 - fp, ", ");
+                    char atype[64];
+                    parse_type(atype);
+                    fp += snprintf(fptype + fp, 64 - fp, "%s", atype);
+                    first = 0;
+                    if (peek().kind == TOK_COMMA) advance();
+                }
+                eat(TOK_RPAREN);
+                fp += snprintf(fptype + fp, 64 - fp, ")");
+                strcpy(p->type, fptype);
+            } else {
+                strcpy(p->type, ptype);
+            }
             strcpy(p->name, pname.text);
         }
         if (peek().kind == TOK_COMMA) eat(TOK_COMMA);

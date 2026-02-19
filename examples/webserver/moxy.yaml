@@ -1,0 +1,8 @@
+project:
+  name: "webserver"
+  version: "0.1.0"
+  description: "Threaded HTTP server written in Moxy"
+  license: "MIT"
+
+build:
+  ldflags: "-lpthread"

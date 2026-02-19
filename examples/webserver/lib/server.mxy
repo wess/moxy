@@ -1,0 +1,91 @@
+// Socket setup, accept loop, per-connection threading
+
+int server_fd;
+int server_running;
+
+void server_stop() {
+    server_running = 0;
+    close(server_fd);
+}
+
+void handle_sigint(int sig) {
+    (void)sig;
+    server_stop();
+}
+
+void *handle_connection(void *arg) {
+    int fd = *((int*)arg);
+    free(arg);
+
+    char buf[MAX_REQUEST];
+    int n = recv(fd, buf, MAX_REQUEST - 1, 0);
+    if (n > 0) {
+        buf[n] = 0;
+        HttpRequest req;
+        if (http_parse_request(buf, &req)) {
+            router_dispatch(fd, &req);
+        } else {
+            http_send_500(fd);
+        }
+    }
+
+    close(fd);
+    return NULL;
+}
+
+int server_init(int port) {
+    server_fd = socket(AF_INET, SOCK_STREAM, 0);
+    if (server_fd < 0) {
+        printf("Error: socket() failed\n");
+        return 0;
+    }
+
+    int opt = 1;
+    setsockopt(server_fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
+
+    struct sockaddr_in addr;
+    memset(&addr, 0, sizeof(addr));
+    addr.sin_family = AF_INET;
+    addr.sin_addr.s_addr = INADDR_ANY;
+    addr.sin_port = htons(port);
+
+    if (bind(server_fd, (struct sockaddr*)&addr, sizeof(addr)) < 0) {
+        printf("Error: bind() failed on port %d\n", port);
+        close(server_fd);
+        return 0;
+    }
+
+    if (listen(server_fd, 128) < 0) {
+        printf("Error: listen() failed\n");
+        close(server_fd);
+        return 0;
+    }
+
+    return 1;
+}
+
+void server_run() {
+    server_running = 1;
+    signal(SIGINT, handle_sigint);
+    signal(SIGPIPE, SIG_IGN);
+
+    while (server_running) {
+        struct sockaddr_in client_addr;
+        socklen_t client_len = sizeof(client_addr);
+        int client_fd = accept(server_fd, (struct sockaddr*)&client_addr, &client_len);
+
+        if (client_fd < 0) {
+            if (!server_running) {
+                break;
+            }
+            continue;
+        }
+
+        int *fd_ptr = (int*)malloc(sizeof(int));
+        *fd_ptr = client_fd;
+
+        pthread_t tid;
+        pthread_create(&tid, NULL, handle_connection, fd_ptr);
+        pthread_detach(tid);
+    }
+}

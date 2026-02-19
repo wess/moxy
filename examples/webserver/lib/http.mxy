@@ -1,0 +1,154 @@
+// HTTP types and helpers
+// System headers, request parsing, response formatting
+
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <unistd.h>
+#include <sys/socket.h>
+#include <netinet/in.h>
+#include <arpa/inet.h>
+#include <pthread.h>
+#include <signal.h>
+
+#define MAX_REQUEST  4096
+#define MAX_RESPONSE 8192
+#define MAX_HEADERS  32
+#define MAX_ROUTES   32
+#define SERVER_PORT  9999
+
+typedef struct {
+    char key[256];
+    char value[256];
+} HttpHeader;
+
+typedef struct {
+    char method[16];
+    char path[256];
+    char version[16];
+    HttpHeader headers[MAX_HEADERS];
+    int header_count;
+    char body[MAX_REQUEST];
+    int content_length;
+} HttpRequest;
+
+int http_parse_request(char *raw, HttpRequest *req) {
+    memset(req, 0, sizeof(HttpRequest));
+
+    // Find end of request line
+    char *line_end = strstr(raw, "\r\n");
+    if (!line_end) {
+        return 0;
+    }
+
+    // Parse method
+    char *sp1 = strchr(raw, ' ');
+    if (!sp1 || sp1 > line_end) {
+        return 0;
+    }
+    int mlen = sp1 - raw;
+    if (mlen > 15) {
+        mlen = 15;
+    }
+    strncpy(req->method, raw, mlen);
+    req->method[mlen] = 0;
+
+    // Parse path
+    char *sp2 = strchr(sp1 + 1, ' ');
+    if (!sp2 || sp2 > line_end) {
+        return 0;
+    }
+    int plen = sp2 - (sp1 + 1);
+    if (plen > 255) {
+        plen = 255;
+    }
+    strncpy(req->path, sp1 + 1, plen);
+    req->path[plen] = 0;
+
+    // Parse version
+    int vlen = line_end - (sp2 + 1);
+    if (vlen > 15) {
+        vlen = 15;
+    }
+    strncpy(req->version, sp2 + 1, vlen);
+    req->version[vlen] = 0;
+
+    // Parse headers
+    char *pos = line_end + 2;
+    while (pos && req->header_count < MAX_HEADERS) {
+        line_end = strstr(pos, "\r\n");
+        if (!line_end || line_end == pos) {
+            break;
+        }
+
+        char *colon = strchr(pos, ':');
+        if (!colon || colon > line_end) {
+            break;
+        }
+
+        int klen = colon - pos;
+        if (klen > 255) {
+            klen = 255;
+        }
+        strncpy(req->headers[req->header_count].key, pos, klen);
+        req->headers[req->header_count].key[klen] = 0;
+
+        char *vstart = colon + 1;
+        while (*vstart == ' ') {
+            vstart++;
+        }
+        int hlen = line_end - vstart;
+        if (hlen > 255) {
+            hlen = 255;
+        }
+        strncpy(req->headers[req->header_count].value, vstart, hlen);
+        req->headers[req->header_count].value[hlen] = 0;
+
+        if (strcmp(req->headers[req->header_count].key, "Content-Length") == 0) {
+            req->content_length = atoi(req->headers[req->header_count].value);
+        }
+
+        req->header_count++;
+        pos = line_end + 2;
+    }
+
+    // Body after blank line
+    if (pos) {
+        char *body_start = strstr(pos, "\r\n");
+        if (body_start) {
+            body_start = body_start + 2;
+            int blen = strlen(body_start);
+            if (blen > MAX_REQUEST - 1) {
+                blen = MAX_REQUEST - 1;
+            }
+            strncpy(req->body, body_start, blen);
+            req->body[blen] = 0;
+        }
+    }
+
+    return 1;
+}
+
+void http_send_response(int fd, int status, string content_type, string body) {
+    char response[MAX_RESPONSE];
+    string status_text = "OK";
+    if (status == 404) {
+        status_text = "Not Found";
+    }
+    if (status == 500) {
+        status_text = "Internal Server Error";
+    }
+
+    int body_len = strlen(body);
+    int n = snprintf(response, MAX_RESPONSE, "HTTP/1.1 %d %s\r\nContent-Type: %s\r\nContent-Length: %d\r\nConnection: close\r\n\r\n%s", status, status_text, content_type, body_len, body);
+
+    write(fd, response, n);
+}
+
+void http_send_404(int fd) {
+    http_send_response(fd, 404, "text/plain", "404 Not Found\n");
+}
+
+void http_send_500(int fd) {
+    http_send_response(fd, 500, "text/plain", "500 Internal Server Error\n");
+}

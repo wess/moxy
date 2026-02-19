@@ -1,0 +1,37 @@
+// Route table and dispatch
+// Linear scan matching on method + path
+
+typedef void (*RouteHandler)(int, HttpRequest*);
+
+typedef struct {
+    char method[16];
+    char path[256];
+    RouteHandler handler;
+} Route;
+
+Route routes[MAX_ROUTES];
+int nroutes;
+
+void router_add(string method, string path, RouteHandler handler) {
+    if (nroutes >= MAX_ROUTES) {
+        return;
+    }
+    strncpy(routes[nroutes].method, method, 15);
+    routes[nroutes].method[15] = 0;
+    strncpy(routes[nroutes].path, path, 255);
+    routes[nroutes].path[255] = 0;
+    routes[nroutes].handler = handler;
+    nroutes++;
+}
+
+void router_dispatch(int fd, HttpRequest *req) {
+    for (int i = 0; i < nroutes; i++) {
+        if (strcmp(routes[i].method, req->method) == 0 &&
+            strcmp(routes[i].path, req->path) == 0) {
+            RouteHandler h = routes[i].handler;
+            h(fd, req);
+            return;
+        }
+    }
+    http_send_404(fd);
+}

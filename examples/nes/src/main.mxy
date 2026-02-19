@@ -5,8 +5,8 @@
 //   brew install sdl2
 //
 // Usage:
-//   goose build
-//   NES_ROM=path/to/rom.nes ./build/debug/moxy run examples/nes/main.mxy
+//   cd examples/nes && moxy build
+//   NES_ROM=path/to/rom.nes moxy run
 //
 // Controls:
 //   Arrow keys = D-pad

@@ -31,6 +31,9 @@ static int forin_counter;
 static int async_counter;
 static int has_futures;
 
+static Node *lambdas[64];
+static int nlambdas;
+
 typedef struct { char name[64]; char type[64]; } ArcVar;
 typedef struct { ArcVar vars[32]; int nvars; } ArcScope;
 static ArcScope arc_scopes[16];
@@ -167,6 +170,10 @@ static const char *c_type_simple(const char *mxy) {
 }
 
 static void c_type_buf(const char *mxy, char *buf) {
+    if (strstr(mxy, "(*)")) {
+        strcpy(buf, mxy);
+        return;
+    }
     if (is_list_type(mxy)) {
         char elem[64];
         list_elem(mxy, elem);
@@ -338,6 +345,11 @@ static const char *infer_type(Node *n) {
             return awbuf;
         }
         return ft;
+    }
+    case NODE_EXPR_LAMBDA: {
+        char lname[64];
+        snprintf(lname, 64, "__moxy_lambda_%d", n->lambda.id);
+        return sym_type(lname);
     }
     case NODE_EXPR_CAST:
     case NODE_RAW:
@@ -685,6 +697,9 @@ static void gen_expr(Node *n) {
         break;
     case NODE_EXPR_AWAIT:
         gen_expr(n->await_expr.inner);
+        break;
+    case NODE_EXPR_LAMBDA:
+        emit("__moxy_lambda_%d", n->lambda.id);
         break;
     default:
         break;
@@ -1210,6 +1225,18 @@ static void gen_enum(Node *n) {
     emit("} %s;\n\n", name);
 }
 
+static void emit_fnptr_param(const char *type, const char *name) {
+    /* type is "ret(*)(args)" — insert name: "ret(*name)(args)" */
+    const char *star = strstr(type, "(*)");
+    if (!star) { emit("%s %s", type, name); return; }
+    int prefix = (int)(star - type) + 2; /* up to and including "(*" */
+    emit("%.*s%s%s", prefix, type, name, star + 2);
+}
+
+static int is_fnptr_type(const char *t) {
+    return strstr(t, "(*)") != NULL;
+}
+
 static void emit_params(Node *n) {
     if (n->func_decl.nparams == 0) {
         emit("void");
@@ -1221,7 +1248,9 @@ static void emit_params(Node *n) {
             } else {
                 char pct[128];
                 c_type_buf(n->func_decl.params[i].type, pct);
-                if (is_arc_type(n->func_decl.params[i].type))
+                if (is_fnptr_type(pct))
+                    emit_fnptr_param(pct, n->func_decl.params[i].name);
+                else if (is_arc_type(n->func_decl.params[i].type))
                     emit("%s *%s", pct, n->func_decl.params[i].name);
                 else
                     emit("%s %s", pct, n->func_decl.params[i].name);
@@ -1444,6 +1473,93 @@ static void collect_types(Node *n) {
         for (int i = 0; i < n->for_in_stmt.nbody; i++)
             collect_types(n->for_in_stmt.body[i]);
         break;
+    case NODE_EXPR_LAMBDA:
+        collect_types(n->lambda.body);
+        break;
+    case NODE_EXPR_STMT:
+        collect_types(n->expr_stmt.expr);
+        break;
+    case NODE_EXPR_CALL:
+        for (int i = 0; i < n->call.nargs; i++)
+            collect_types(n->call.args[i]);
+        break;
+    case NODE_RETURN_STMT:
+        if (n->return_stmt.value) collect_types(n->return_stmt.value);
+        break;
+    case NODE_BLOCK:
+        for (int i = 0; i < n->block.nstmts; i++)
+            collect_types(n->block.stmts[i]);
+        break;
+    default:
+        break;
+    }
+}
+
+static void collect_lambdas(Node *n) {
+    if (!n) return;
+    switch (n->kind) {
+    case NODE_PROGRAM:
+        for (int i = 0; i < n->program.ndecls; i++)
+            collect_lambdas(n->program.decls[i]);
+        break;
+    case NODE_FUNC_DECL:
+        for (int i = 0; i < n->func_decl.nbody; i++)
+            collect_lambdas(n->func_decl.body[i]);
+        break;
+    case NODE_VAR_DECL:
+        collect_lambdas(n->var_decl.value);
+        break;
+    case NODE_EXPR_STMT:
+        collect_lambdas(n->expr_stmt.expr);
+        break;
+    case NODE_EXPR_CALL:
+        for (int i = 0; i < n->call.nargs; i++)
+            collect_lambdas(n->call.args[i]);
+        break;
+    case NODE_RETURN_STMT:
+        if (n->return_stmt.value) collect_lambdas(n->return_stmt.value);
+        break;
+    case NODE_IF_STMT:
+        collect_lambdas(n->if_stmt.cond);
+        if (n->if_stmt.then_body)
+            for (int i = 0; i < n->if_stmt.then_body->block.nstmts; i++)
+                collect_lambdas(n->if_stmt.then_body->block.stmts[i]);
+        if (n->if_stmt.else_body)
+            for (int i = 0; i < n->if_stmt.else_body->block.nstmts; i++)
+                collect_lambdas(n->if_stmt.else_body->block.stmts[i]);
+        break;
+    case NODE_WHILE_STMT:
+        for (int i = 0; i < n->while_stmt.nbody; i++)
+            collect_lambdas(n->while_stmt.body[i]);
+        break;
+    case NODE_FOR_STMT:
+        collect_lambdas(n->for_stmt.init);
+        for (int i = 0; i < n->for_stmt.nbody; i++)
+            collect_lambdas(n->for_stmt.body[i]);
+        break;
+    case NODE_FOR_IN_STMT:
+        for (int i = 0; i < n->for_in_stmt.nbody; i++)
+            collect_lambdas(n->for_in_stmt.body[i]);
+        break;
+    case NODE_BLOCK:
+        for (int i = 0; i < n->block.nstmts; i++)
+            collect_lambdas(n->block.stmts[i]);
+        break;
+    case NODE_ASSIGN:
+        collect_lambdas(n->assign.value);
+        break;
+    case NODE_EXPR_BINOP:
+        collect_lambdas(n->binop.left);
+        collect_lambdas(n->binop.right);
+        break;
+    case NODE_EXPR_PAREN:
+        collect_lambdas(n->paren.inner);
+        break;
+    case NODE_EXPR_LAMBDA:
+        n->lambda.id = nlambdas;
+        lambdas[nlambdas++] = n;
+        collect_lambdas(n->lambda.body);
+        break;
     default:
         break;
     }
@@ -1465,11 +1581,13 @@ const char *codegen(Node *program) {
     forin_counter = 0;
     async_counter = 0;
     has_futures = 0;
+    nlambdas = 0;
     arc_depth = 0;
     memset(arc_scopes, 0, sizeof(arc_scopes));
     memset(out, 0, sizeof(out));
 
     collect_types(program);
+    collect_lambdas(program);
 
     for (int i = 0; i < nuser_includes; i++)
         emit("%s\n", user_includes[i]);
@@ -1516,6 +1634,75 @@ const char *codegen(Node *program) {
     for (int i = 0; i < program->program.ndecls; i++) {
         if (program->program.decls[i]->kind == NODE_RAW)
             emit("%s\n", program->program.decls[i]->raw.text);
+    }
+
+    /* emit lambda functions as static inline */
+    for (int i = 0; i < nlambdas; i++) {
+        Node *lam = lambdas[i];
+        char ret_buf[64];
+        strcpy(ret_buf, "void");
+
+        if (lam->lambda.is_expr) {
+            int sym_save = nsyms;
+            for (int p = 0; p < lam->lambda.nparams; p++)
+                sym_add(lam->lambda.params[p].name, lam->lambda.params[p].type);
+            const char *r = infer_type(lam->lambda.body);
+            strcpy(ret_buf, r ? r : "int");
+            nsyms = sym_save;
+        } else {
+            Node *block = lam->lambda.body;
+            int sym_save = nsyms;
+            for (int p = 0; p < lam->lambda.nparams; p++)
+                sym_add(lam->lambda.params[p].name, lam->lambda.params[p].type);
+            for (int s = 0; s < block->block.nstmts; s++) {
+                if (block->block.stmts[s]->kind == NODE_RETURN_STMT &&
+                    block->block.stmts[s]->return_stmt.value) {
+                    const char *r = infer_type(block->block.stmts[s]->return_stmt.value);
+                    strcpy(ret_buf, r ? r : "int");
+                    break;
+                }
+            }
+            nsyms = sym_save;
+        }
+
+        char retct[128];
+        c_type_buf(ret_buf, retct);
+
+        emit("static inline %s __moxy_lambda_%d(", retct, lam->lambda.id);
+        if (lam->lambda.nparams == 0) {
+            emit("void");
+        } else {
+            for (int p = 0; p < lam->lambda.nparams; p++) {
+                if (p > 0) emit(", ");
+                char pct[128];
+                c_type_buf(lam->lambda.params[p].type, pct);
+                emit("%s %s", pct, lam->lambda.params[p].name);
+            }
+        }
+        emit(") {\n");
+
+        int sym_save = nsyms;
+        for (int p = 0; p < lam->lambda.nparams; p++)
+            sym_add(lam->lambda.params[p].name, lam->lambda.params[p].type);
+
+        indent = 1;
+        if (lam->lambda.is_expr) {
+            emit_indent();
+            emit("return ");
+            gen_expr(lam->lambda.body);
+            emit(";\n");
+        } else {
+            for (int s = 0; s < lam->lambda.body->block.nstmts; s++)
+                gen_stmt(lam->lambda.body->block.stmts[s]);
+        }
+        indent = 0;
+        emit("}\n\n");
+
+        nsyms = sym_save;
+
+        char lname[64];
+        snprintf(lname, 64, "__moxy_lambda_%d", lam->lambda.id);
+        sym_add(lname, ret_buf);
     }
 
     for (int i = 0; i < program->program.ndecls; i++)

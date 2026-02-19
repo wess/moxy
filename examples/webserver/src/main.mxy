@@ -1,0 +1,51 @@
+// Threaded HTTP server written in Moxy
+//
+// Prerequisites: none (POSIX only)
+//
+// Usage:
+//   cd examples/webserver && moxy build
+//   ./webserver
+//
+// Test:
+//   curl http://localhost:8080/
+//   curl http://localhost:8080/health
+//   curl http://localhost:8080/hello
+
+#include "../lib/http.mxy"
+#include "../lib/router.mxy"
+#include "../lib/server.mxy"
+
+void handle_index(int fd, HttpRequest *req) {
+    (void)req;
+    string html = "<html><head><title>Moxy Web Server</title><style>body{font-family:sans-serif;max-width:600px;margin:80px auto;text-align:center}h1{color:#333}p{color:#666}</style></head><body><h1>Moxy Web Server</h1><p>A threaded HTTP server written in Moxy.</p><p>Routes: / | /health | /hello</p></body></html>\n";
+    http_send_response(fd, 200, "text/html", html);
+}
+
+void handle_health(int fd, HttpRequest *req) {
+    (void)req;
+    http_send_response(fd, 200, "application/json", "{\"status\":\"ok\"}\n");
+}
+
+void handle_hello(int fd, HttpRequest *req) {
+    (void)req;
+    http_send_response(fd, 200, "text/plain", "Hello, World!\n");
+}
+
+void main() {
+    nroutes = 0;
+
+    router_add("GET", "/", handle_index);
+    router_add("GET", "/health", handle_health);
+    router_add("GET", "/hello", handle_hello);
+
+    if (!server_init(SERVER_PORT)) {
+        return;
+    }
+
+    printf("Listening on http://localhost:%d\n", SERVER_PORT);
+    printf("Press Ctrl+C to stop\n");
+
+    server_run();
+
+    printf("\nShutdown complete\n");
+}

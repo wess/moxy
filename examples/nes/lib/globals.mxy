@@ -59,9 +59,9 @@ int ppu_nmi_output;
 int ppu_nmi_delay;
 
 // Cartridge
-u8 prg_rom_data[524288]; // max 512KB PRG
-u8 chr_rom_data[262144]; // max 256KB CHR
-u8 chr_ram[8192];        // 8KB CHR-RAM for mapper 0 w/o CHR-ROM
+static u8 prg_rom_data[524288]; // max 512KB PRG
+static u8 chr_rom_data[262144]; // max 256KB CHR
+static u8 chr_ram[8192];        // 8KB CHR-RAM for mapper 0 w/o CHR-ROM
 int prg_size;
 int chr_size;
 int chr_is_ram;
@@ -80,7 +80,7 @@ int mmc3_irq_reload;
 int mmc3_irq_pending;
 
 // Framebuffer (ARGB)
-u32 framebuf[61440]; // 256 * 240
+static u32 framebuf[61440]; // 256 * 240
 
 // Controller
 u8 ctrl_state;
