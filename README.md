@@ -76,9 +76,9 @@ makepkg -si
 ### asdf
 
 ```sh
-asdf plugin add moxy https://github.com/wess/moxy.git tools/asdf
+asdf plugin add moxy https://github.com/wess/moxy.git
 asdf install moxy latest
-asdf set moxy latest
+asdf set --home moxy latest
 ```
 
 ### From source
