@@ -1,0 +1,25 @@
+#include <string.h>
+
+int str_len(string s) {
+  return strlen(s);
+}
+
+int str_eq(string a, string b) {
+  return strcmp(a, b) == 0;
+}
+
+int str_contains(string haystack, string needle) {
+  return strstr(haystack, needle) != NULL;
+}
+
+int str_starts_with(string s, string prefix) {
+  int plen = strlen(prefix);
+  return strncmp(s, prefix, plen) == 0;
+}
+
+int str_ends_with(string s, string suffix) {
+  int slen = strlen(s);
+  int suflen = strlen(suffix);
+  if (suflen > slen) { return 0; }
+  return strcmp(s + slen - suflen, suffix) == 0;
+}

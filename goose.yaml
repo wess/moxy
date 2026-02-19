@@ -10,5 +10,14 @@ build:
   cflags: "-Wall -Wextra -std=c11"
   includes:
     - "src"
+    - "libs/goose/src"
 
 dependencies:
+  goose:
+    path: "libs/goose"
+
+tasks:
+  demo: "./build/debug/moxy run examples/features.mxy"
+  transpile: "./build/debug/moxy examples/math.mxy"
+  check: "./build/debug/moxy fmt --check"
+  genstdlib: "sh scripts/genstdlib.sh"

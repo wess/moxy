@@ -1,0 +1,20 @@
+int abs_int(int x) {
+  if (x < 0) { return -x; }
+  return x;
+}
+
+int min_int(int a, int b) {
+  if (a < b) { return a; }
+  return b;
+}
+
+int max_int(int a, int b) {
+  if (a > b) { return a; }
+  return b;
+}
+
+int clamp_int(int x, int lo, int hi) {
+  if (x < lo) { return lo; }
+  if (x > hi) { return hi; }
+  return x;
+}

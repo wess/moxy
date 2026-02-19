@@ -1,0 +1,17 @@
+#include <stdio.h>
+#include <stdlib.h>
+
+void panic(string msg) {
+  fprintf(stderr, "panic: %s\n", msg);
+  exit(1);
+}
+
+void todo(string msg) {
+  fprintf(stderr, "todo: %s\n", msg);
+  exit(1);
+}
+
+void unreachable() {
+  fprintf(stderr, "unreachable code reached\n");
+  exit(1);
+}

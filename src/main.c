@@ -11,10 +11,25 @@
 #include "parser.h"
 #include "codegen.h"
 #include "diag.h"
-#include "yaml.h"
+#include "mxyconf.h"
 #include "fmt.h"
 #include "lint.h"
 #include "flags.h"
+#include "mxystdlib.h"
+
+/* goose library headers */
+#include "headers/main.h"
+#include "headers/color.h"
+#include "headers/config.h"
+#include "headers/build.h"
+#include "headers/pkg.h"
+#include "headers/fs.h"
+#include "headers/lock.h"
+
+#define MOXY_CONFIG "moxy.yaml"
+#define MOXY_LOCK   "moxy.lock"
+
+/* ── helpers ─────────────────────────────────────────────────── */
 
 static char *read_file(const char *path) {
     FILE *f = fopen(path, "r");
@@ -22,6 +37,19 @@ static char *read_file(const char *path) {
         fprintf(stderr, "moxy: cannot open '%s'\n", path);
         exit(1);
     }
+    fseek(f, 0, SEEK_END);
+    long len = ftell(f);
+    fseek(f, 0, SEEK_SET);
+    char *buf = malloc(len + 1);
+    fread(buf, 1, len, f);
+    buf[len] = '\0';
+    fclose(f);
+    return buf;
+}
+
+static char *try_read_file(const char *path) {
+    FILE *f = fopen(path, "r");
+    if (!f) return NULL;
     fseek(f, 0, SEEK_END);
     long len = ftell(f);
     fseek(f, 0, SEEK_SET);
@@ -51,6 +79,31 @@ static int ends_with(const char *s, const char *suffix) {
     if (suflen > slen) return 0;
     return strcmp(s + slen - suflen, suffix) == 0;
 }
+
+static int is_project_mode(void) {
+    return fs_exists(MOXY_CONFIG);
+}
+
+/* walk up from dir looking for moxy.yaml */
+static char *find_project_yaml(const char *file_dir) {
+    char dir[1024];
+    char path[1024];
+    if (file_dir) {
+        strncpy(dir, file_dir, sizeof(dir) - 1);
+        dir[sizeof(dir) - 1] = '\0';
+        while (dir[0]) {
+            snprintf(path, sizeof(path), "%s/%s", dir, MOXY_CONFIG);
+            if (fs_exists(path)) return strdup(path);
+            char *slash = strrchr(dir, '/');
+            if (!slash) break;
+            *slash = '\0';
+        }
+    }
+    if (fs_exists(MOXY_CONFIG)) return strdup(MOXY_CONFIG);
+    return NULL;
+}
+
+/* ── preprocessor ────────────────────────────────────────────── */
 
 static char *preprocess(const char *src, const char *srcpath) {
     char basedir[512];
@@ -116,8 +169,23 @@ static char *preprocess(const char *src, const char *srcpath) {
                 char fullpath[768];
                 snprintf(fullpath, sizeof(fullpath), "%s/%s", basedir, filename);
 
-                char *inc_src = read_file(fullpath);
-                char *processed = preprocess(inc_src, fullpath);
+                char *inc_src = try_read_file(fullpath);
+                const char *vpath = fullpath;
+
+                if (!inc_src) {
+                    const char *embedded = stdlib_lookup(filename);
+                    if (embedded) {
+                        inc_src = strdup(embedded);
+                        vpath = filename;
+                    }
+                }
+
+                if (!inc_src) {
+                    fprintf(stderr, "moxy: cannot find '%s' (checked disk and stdlib)\n", filename);
+                    exit(1);
+                }
+
+                char *processed = preprocess(inc_src, vpath);
 
                 int plen = (int)strlen(processed);
                 while (pos + plen + 2 >= cap) {
@@ -158,6 +226,8 @@ static char *preprocess(const char *src, const char *srcpath) {
     return out;
 }
 
+/* ── transpile pipeline ──────────────────────────────────────── */
+
 static const char *transpile(const char *path) {
     codegen_reset_includes();
     char *raw = read_file(path);
@@ -184,39 +254,50 @@ static const char *transpile(const char *path) {
     return c_code;
 }
 
-static void rmrf(const char *path) {
-    char cmd[600];
-    snprintf(cmd, sizeof(cmd), "rm -rf '%s'", path);
-    system(cmd);
+/* transpile a .mxy file to a .c file on disk */
+static int transpile_to_file(const char *mxy_path, const char *c_path) {
+    const char *c_code = transpile(mxy_path);
+    FILE *f = fopen(c_path, "w");
+    if (!f) {
+        fprintf(stderr, "moxy: cannot write '%s'\n", c_path);
+        return -1;
+    }
+    fputs(c_code, f);
+    fclose(f);
+    return 0;
 }
 
-static int compile(const char *cpath, const char *binpath, const char *srcdir) {
+/* ── single-file compile (for run/build on individual .mxy) ── */
+
+static int compile_single(const char *cpath, const char *binpath, const char *srcdir) {
     const char *cc = getenv("CC");
     if (!cc) cc = "cc";
 
     const char *env_cflags = getenv("CFLAGS");
     const char *pthread_flag = moxy_async_enabled ? " -lpthread" : "";
 
-    /* look for goose.yaml in source directory for build flags */
-    char goose_cflags[512] = {0};
-    char goose_ldflags[512] = {0};
-    char *gpath = goose_find(srcdir);
-    if (gpath) {
-        GooseBuild gb = goose_load(gpath);
-        if (gb.cflags[0]) strncpy(goose_cflags, gb.cflags, sizeof(goose_cflags) - 1);
-        if (gb.ldflags[0]) strncpy(goose_ldflags, gb.ldflags, sizeof(goose_ldflags) - 1);
-        free(gpath);
+    /* look for moxy.yaml in source directory for build flags */
+    char proj_cflags[512] = {0};
+    char proj_ldflags[512] = {0};
+    char *ypath = find_project_yaml(srcdir);
+    if (ypath) {
+        Config cfg;
+        if (config_load(ypath, &cfg) == 0) {
+            if (cfg.cflags[0]) strncpy(proj_cflags, cfg.cflags, sizeof(proj_cflags) - 1);
+            if (cfg.ldflags[0]) strncpy(proj_ldflags, cfg.ldflags, sizeof(proj_ldflags) - 1);
+        }
+        free(ypath);
     }
 
     char cmd[4096];
     int off = snprintf(cmd, sizeof(cmd), "%s -std=c11", cc);
 
     if (env_cflags) off += snprintf(cmd + off, sizeof(cmd) - off, " %s", env_cflags);
-    if (goose_cflags[0]) off += snprintf(cmd + off, sizeof(cmd) - off, " %s", goose_cflags);
+    if (proj_cflags[0]) off += snprintf(cmd + off, sizeof(cmd) - off, " %s", proj_cflags);
 
     off += snprintf(cmd + off, sizeof(cmd) - off, " -o '%s' '%s'", binpath, cpath);
 
-    if (goose_ldflags[0]) off += snprintf(cmd + off, sizeof(cmd) - off, " %s", goose_ldflags);
+    if (proj_ldflags[0]) off += snprintf(cmd + off, sizeof(cmd) - off, " %s", proj_ldflags);
     if (pthread_flag[0]) off += snprintf(cmd + off, sizeof(cmd) - off, "%s", pthread_flag);
 
     int status = system(cmd);
@@ -226,13 +307,82 @@ static int compile(const char *cpath, const char *binpath, const char *srcdir) {
     return 0;
 }
 
-static int cmd_run(int argc, char **argv) {
-    if (argc < 3) {
-        fprintf(stderr, "usage: moxy run <file.mxy> [args...]\n");
-        return 1;
+/* ── project-mode transpile all .mxy to build/gen/ ───────── */
+
+static void collect_mxy_files(const char *dir, char files[][512], int *count, int max) {
+    DIR *d = opendir(dir);
+    if (!d) return;
+
+    struct dirent *ent;
+    while ((ent = readdir(d)) != NULL && *count < max) {
+        if (ent->d_name[0] == '.') continue;
+
+        char path[512];
+        snprintf(path, sizeof(path), "%s/%s", dir, ent->d_name);
+
+        if (ent->d_type == DT_DIR) {
+            collect_mxy_files(path, files, count, max);
+        } else if (ends_with(ent->d_name, ".mxy")) {
+            strncpy(files[*count], path, 511);
+            files[*count][511] = '\0';
+            (*count)++;
+        }
+    }
+    closedir(d);
+}
+
+static int transpile_project(const Config *cfg) {
+    char gen_dir[512];
+    snprintf(gen_dir, sizeof(gen_dir), "%s/gen", GOOSE_BUILD);
+    fs_mkdir(GOOSE_BUILD);
+    fs_mkdir(gen_dir);
+
+    char mxy_files[256][512];
+    int mxy_count = 0;
+    collect_mxy_files(cfg->src_dir, mxy_files, &mxy_count, 256);
+
+    if (mxy_count == 0) return 0;
+
+    for (int i = 0; i < mxy_count; i++) {
+        const char *base = strrchr(mxy_files[i], '/');
+        base = base ? base + 1 : mxy_files[i];
+
+        char stem[256];
+        strncpy(stem, base, sizeof(stem) - 1);
+        stem[sizeof(stem) - 1] = '\0';
+        char *dot = strrchr(stem, '.');
+        if (dot) *dot = '\0';
+
+        char out_path[512];
+        snprintf(out_path, sizeof(out_path), "%s/%s.c", gen_dir, stem);
+
+        /* detect feature flags from source */
+        char *test_src = read_file(mxy_files[i]);
+        if (strstr(test_src, "Future<") || strstr(test_src, "await "))
+            moxy_async_enabled = 1;
+        if (strstr(test_src, "[]") || strstr(test_src, "map["))
+            moxy_arc_enabled = 1;
+        free(test_src);
+
+        info("Transpiling", "%s", base);
+        if (transpile_to_file(mxy_files[i], out_path) != 0)
+            return -1;
     }
 
-    const char *srcpath = argv[2];
+    return 0;
+}
+
+/* ── commands ────────────────────────────────────────────────── */
+
+static double now_ms(void) {
+    struct timeval tv;
+    gettimeofday(&tv, NULL);
+    return tv.tv_sec * 1000.0 + tv.tv_usec / 1000.0;
+}
+
+/* ── single-file commands ────────────────────────────────────── */
+
+static int cmd_run_file(const char *srcpath, int argc, char **argv, int arg_offset) {
     char srcdir[512];
     dir_of(srcpath, srcdir, sizeof(srcdir));
     const char *c_code = transpile(srcpath);
@@ -250,24 +400,23 @@ static int cmd_run(int argc, char **argv) {
     FILE *f = fopen(cpath, "w");
     if (!f) {
         fprintf(stderr, "moxy: failed to write temp file\n");
-        rmrf(tmpdir);
+        fs_rmrf(tmpdir);
         return 1;
     }
     fputs(c_code, f);
     fclose(f);
 
-    int rc = compile(cpath, binpath, srcdir);
+    int rc = compile_single(cpath, binpath, srcdir);
     if (rc != 0) {
-        rmrf(tmpdir);
+        fs_rmrf(tmpdir);
         return rc;
     }
 
-    int prog_argc = argc - 3;
+    int prog_argc = argc - arg_offset;
     char **prog_argv = malloc(sizeof(char *) * (prog_argc + 2));
     prog_argv[0] = binpath;
-    for (int i = 0; i < prog_argc; i++) {
-        prog_argv[i + 1] = argv[i + 3];
-    }
+    for (int i = 0; i < prog_argc; i++)
+        prog_argv[i + 1] = argv[i + arg_offset];
     prog_argv[prog_argc + 1] = NULL;
 
     pid_t pid = fork();
@@ -281,29 +430,15 @@ static int cmd_run(int argc, char **argv) {
     waitpid(pid, &status, 0);
 
     free(prog_argv);
-    rmrf(tmpdir);
+    fs_rmrf(tmpdir);
 
     if (WIFEXITED(status)) return WEXITSTATUS(status);
     return 1;
 }
 
-static int cmd_build(int argc, char **argv) {
-    if (argc < 3) {
-        fprintf(stderr, "usage: moxy build <file.mxy> [-o output]\n");
-        return 1;
-    }
-
-    const char *srcpath = argv[2];
+static int cmd_build_file(const char *srcpath, const char *outpath) {
     char srcdir[512];
     dir_of(srcpath, srcdir, sizeof(srcdir));
-    const char *outpath = NULL;
-
-    for (int i = 3; i < argc - 1; i++) {
-        if (strcmp(argv[i], "-o") == 0) {
-            outpath = argv[i + 1];
-            break;
-        }
-    }
 
     char derived[256];
     if (!outpath) {
@@ -330,26 +465,138 @@ static int cmd_build(int argc, char **argv) {
     FILE *f = fopen(cpath, "w");
     if (!f) {
         fprintf(stderr, "moxy: failed to write temp file\n");
-        rmrf(tmpdir);
+        fs_rmrf(tmpdir);
         return 1;
     }
     fputs(c_code, f);
     fclose(f);
 
-    int rc = compile(cpath, outpath, srcdir);
-    rmrf(tmpdir);
+    int rc = compile_single(cpath, outpath, srcdir);
+    fs_rmrf(tmpdir);
 
-    if (rc == 0) {
-        fprintf(stderr, "moxy: built %s\n", outpath);
-    }
+    if (rc == 0)
+        info("Built", "%s", outpath);
     return rc;
 }
 
-static double now_ms(void) {
-    struct timeval tv;
-    gettimeofday(&tv, NULL);
-    return tv.tv_sec * 1000.0 + tv.tv_usec / 1000.0;
+/* ── project-mode commands ───────────────────────────────────── */
+
+static int load_project(Config *cfg, LockFile *lf) {
+    if (config_load(MOXY_CONFIG, cfg) != 0) {
+        err("failed to load %s", MOXY_CONFIG);
+        return -1;
+    }
+    memset(lf, 0, sizeof(*lf));
+    lock_load(MOXY_LOCK, lf);
+    return 0;
 }
+
+static int cmd_build_project(int release) {
+    Config cfg;
+    LockFile lf;
+    if (load_project(&cfg, &lf) != 0) return 1;
+
+    if (cfg.dep_count > 0) {
+        pkg_fetch_all(&cfg, &lf);
+        lock_save(MOXY_LOCK, &lf);
+    }
+
+    if (transpile_project(&cfg) != 0) return 1;
+    if (build_project(&cfg, release) != 0) return 1;
+
+    return 0;
+}
+
+static int cmd_run_project(int release, int argc, char **argv, int arg_offset) {
+    if (cmd_build_project(release) != 0) return 1;
+
+    Config cfg;
+    config_load(MOXY_CONFIG, &cfg);
+
+    char binpath[512];
+    snprintf(binpath, sizeof(binpath), "%s/%s/%s",
+             GOOSE_BUILD, release ? "release" : "debug", cfg.name);
+
+    int prog_argc = argc - arg_offset;
+    char **prog_argv = malloc(sizeof(char *) * (prog_argc + 2));
+    prog_argv[0] = binpath;
+    for (int i = 0; i < prog_argc; i++)
+        prog_argv[i + 1] = argv[i + arg_offset];
+    prog_argv[prog_argc + 1] = NULL;
+
+    pid_t pid = fork();
+    if (pid == 0) {
+        execv(binpath, prog_argv);
+        perror("moxy: exec failed");
+        _exit(127);
+    }
+
+    int status;
+    waitpid(pid, &status, 0);
+    free(prog_argv);
+
+    if (WIFEXITED(status)) return WEXITSTATUS(status);
+    return 1;
+}
+
+/* ── command dispatchers ─────────────────────────────────────── */
+
+static int cmd_run(int argc, char **argv) {
+    int release = 0;
+    int arg_idx = 2;
+
+    /* scan for --release/-r before file arg */
+    for (int i = 2; i < argc; i++) {
+        if (strcmp(argv[i], "--release") == 0 || strcmp(argv[i], "-r") == 0) {
+            release = 1;
+            /* shift args */
+            for (int j = i; j < argc - 1; j++) argv[j] = argv[j + 1];
+            argc--;
+            i--;
+        }
+    }
+
+    /* if next arg is a .mxy file → single-file mode */
+    if (argc > 2 && ends_with(argv[2], ".mxy"))
+        return cmd_run_file(argv[2], argc, argv, 3);
+
+    /* project mode */
+    if (!is_project_mode()) {
+        fprintf(stderr, "usage: moxy run <file.mxy> [args]\n");
+        fprintf(stderr, "   or: moxy run [--release] (in a project with %s)\n", MOXY_CONFIG);
+        return 1;
+    }
+
+    return cmd_run_project(release, argc, argv, arg_idx);
+}
+
+static int cmd_build(int argc, char **argv) {
+    int release = 0;
+    const char *outpath = NULL;
+
+    for (int i = 2; i < argc; i++) {
+        if (strcmp(argv[i], "--release") == 0 || strcmp(argv[i], "-r") == 0) {
+            release = 1;
+        } else if (strcmp(argv[i], "-o") == 0 && i + 1 < argc) {
+            outpath = argv[++i];
+        }
+    }
+
+    /* if a .mxy file is specified → single-file mode */
+    if (argc > 2 && ends_with(argv[2], ".mxy"))
+        return cmd_build_file(argv[2], outpath);
+
+    /* project mode */
+    if (!is_project_mode()) {
+        fprintf(stderr, "usage: moxy build <file.mxy> [-o out]\n");
+        fprintf(stderr, "   or: moxy build [--release] (in a project with %s)\n", MOXY_CONFIG);
+        return 1;
+    }
+
+    return cmd_build_project(release);
+}
+
+/* ── test ────────────────────────────────────────────────────── */
 
 static int run_one_test(const char *srcpath) {
     char *test_src = read_file(srcpath);
@@ -375,14 +622,14 @@ static int run_one_test(const char *srcpath) {
     snprintf(binpath, sizeof(binpath), "%s/out", tmpdir);
 
     FILE *f = fopen(cpath, "w");
-    if (!f) { rmrf(tmpdir); return 1; }
+    if (!f) { fs_rmrf(tmpdir); return 1; }
     fputs(c_code, f);
     fclose(f);
 
     char testdir[512];
     dir_of(srcpath, testdir, sizeof(testdir));
-    int rc = compile(cpath, binpath, testdir);
-    if (rc != 0) { rmrf(tmpdir); return rc; }
+    int rc = compile_single(cpath, binpath, testdir);
+    if (rc != 0) { fs_rmrf(tmpdir); return rc; }
 
     pid_t pid = fork();
     if (pid == 0) {
@@ -392,7 +639,7 @@ static int run_one_test(const char *srcpath) {
 
     int status;
     waitpid(pid, &status, 0);
-    rmrf(tmpdir);
+    fs_rmrf(tmpdir);
 
     moxy_async_enabled = saved_async;
     moxy_arc_enabled = saved_arc;
@@ -420,7 +667,6 @@ static void collect_files(const char *dir, const char *suffix, char files[][512]
             (*count)++;
         }
     }
-
     closedir(d);
 }
 
@@ -474,17 +720,18 @@ static int cmd_test(int argc, char **argv) {
     return failed > 0 ? 1 : 0;
 }
 
+/* ── fmt / lint ──────────────────────────────────────────────── */
 
 static MoxyConfig load_config_for(const char *filepath) {
     char filedir[512];
     dir_of(filepath, filedir, sizeof(filedir));
-    char *cfgpath = config_find(".", filedir);
+    char *cfgpath = mxyconf_find(".", filedir);
     MoxyConfig cfg;
     if (cfgpath) {
-        cfg = config_load(cfgpath);
+        cfg = mxyconf_load(cfgpath);
         free(cfgpath);
     } else {
-        cfg = config_defaults();
+        cfg = mxyconf_defaults();
     }
     return cfg;
 }
@@ -504,9 +751,8 @@ static int cmd_fmt(int argc, char **argv) {
         }
     }
 
-    if (nfiles == 0) {
+    if (nfiles == 0)
         collect_files(".", ".mxy", files, &nfiles, 256);
-    }
 
     if (nfiles == 0) {
         fprintf(stderr, "moxy: no .mxy files found\n");
@@ -555,9 +801,8 @@ static int cmd_lint(int argc, char **argv) {
         nfiles++;
     }
 
-    if (nfiles == 0) {
+    if (nfiles == 0)
         collect_files(".", ".mxy", files, &nfiles, 256);
-    }
 
     if (nfiles == 0) {
         fprintf(stderr, "moxy: no .mxy files found\n");
@@ -599,17 +844,297 @@ static int cmd_lint(int argc, char **argv) {
     return total_warnings > 0 ? 1 : 0;
 }
 
+/* ── package management commands ─────────────────────────────── */
+
+static int cmd_new(int argc, char **argv) {
+    if (argc < 3) {
+        fprintf(stderr, "usage: moxy new <name>\n");
+        return 1;
+    }
+
+    const char *name = argv[2];
+
+    if (fs_exists(name)) {
+        err("directory '%s' already exists", name);
+        return 1;
+    }
+
+    info("Creating", "%s", name);
+    fs_mkdir(name);
+
+    char path[512];
+
+    /* write moxy.yaml */
+    Config cfg;
+    config_default(&cfg, name);
+    snprintf(path, sizeof(path), "%s/%s", name, MOXY_CONFIG);
+    config_save(path, &cfg);
+
+    /* write src/main.mxy */
+    snprintf(path, sizeof(path), "%s/src", name);
+    fs_mkdir(path);
+
+    snprintf(path, sizeof(path), "%s/src/main.mxy", name);
+    fs_write_file(path,
+        "#include <stdio.h>\n"
+        "\n"
+        "void main() {\n"
+        "    print(\"hello, world\")\n"
+        "}\n"
+    );
+
+    /* write .gitignore */
+    snprintf(path, sizeof(path), "%s/.gitignore", name);
+    fs_write_file(path,
+        "build/\n"
+        "packages/\n"
+    );
+
+    info("Created", "project %s", name);
+    return 0;
+}
+
+static int cmd_init(int argc, char **argv) {
+    (void)argc; (void)argv;
+
+    if (fs_exists(MOXY_CONFIG)) {
+        err("%s already exists", MOXY_CONFIG);
+        return 1;
+    }
+
+    /* derive name from current directory */
+    char cwd[512];
+    if (!getcwd(cwd, sizeof(cwd))) {
+        err("cannot get current directory");
+        return 1;
+    }
+    const char *name = strrchr(cwd, '/');
+    name = name ? name + 1 : cwd;
+
+    Config cfg;
+    config_default(&cfg, name);
+    config_save(MOXY_CONFIG, &cfg);
+
+    if (!fs_exists("src")) fs_mkdir("src");
+
+    if (!fs_exists(".gitignore")) {
+        fs_write_file(".gitignore",
+            "build/\n"
+            "packages/\n"
+        );
+    }
+
+    info("Initialized", "project %s", name);
+    return 0;
+}
+
+static int cmd_add(int argc, char **argv) {
+    if (argc < 3) {
+        fprintf(stderr, "usage: moxy add <git-url> [--name N] [--version TAG]\n");
+        return 1;
+    }
+
+    if (!is_project_mode()) {
+        err("no %s found", MOXY_CONFIG);
+        return 1;
+    }
+
+    const char *git_url = argv[2];
+    const char *dep_name = NULL;
+    const char *dep_version = "";
+
+    for (int i = 3; i < argc - 1; i++) {
+        if (strcmp(argv[i], "--name") == 0) dep_name = argv[++i];
+        else if (strcmp(argv[i], "--version") == 0) dep_version = argv[++i];
+    }
+
+    if (!dep_name) dep_name = pkg_name_from_git(git_url);
+
+    Config cfg;
+    LockFile lf;
+    if (load_project(&cfg, &lf) != 0) return 1;
+
+    /* check if already exists */
+    for (int i = 0; i < cfg.dep_count; i++) {
+        if (strcmp(cfg.deps[i].name, dep_name) == 0) {
+            err("dependency '%s' already exists", dep_name);
+            return 1;
+        }
+    }
+
+    if (cfg.dep_count >= MAX_DEPS) {
+        err("too many dependencies (max %d)", MAX_DEPS);
+        return 1;
+    }
+
+    /* add to config */
+    Dependency *dep = &cfg.deps[cfg.dep_count++];
+    strncpy(dep->name, dep_name, MAX_NAME_LEN - 1);
+    strncpy(dep->git, git_url, MAX_PATH_LEN - 1);
+    strncpy(dep->version, dep_version, sizeof(dep->version) - 1);
+
+    /* fetch */
+    info("Adding", "%s", dep_name);
+    if (pkg_fetch(dep, GOOSE_PKG_DIR, &lf) != 0) {
+        err("failed to fetch %s", dep_name);
+        return 1;
+    }
+
+    config_save(MOXY_CONFIG, &cfg);
+    lock_save(MOXY_LOCK, &lf);
+
+    info("Added", "%s", dep_name);
+    return 0;
+}
+
+static int cmd_remove(int argc, char **argv) {
+    if (argc < 3) {
+        fprintf(stderr, "usage: moxy remove <name>\n");
+        return 1;
+    }
+
+    if (!is_project_mode()) {
+        err("no %s found", MOXY_CONFIG);
+        return 1;
+    }
+
+    const char *name = argv[2];
+
+    Config cfg;
+    LockFile lf;
+    if (load_project(&cfg, &lf) != 0) return 1;
+
+    /* find and remove from config */
+    int found = -1;
+    for (int i = 0; i < cfg.dep_count; i++) {
+        if (strcmp(cfg.deps[i].name, name) == 0) {
+            found = i;
+            break;
+        }
+    }
+
+    if (found < 0) {
+        err("dependency '%s' not found", name);
+        return 1;
+    }
+
+    info("Removing", "%s", name);
+
+    /* shift deps down */
+    for (int i = found; i < cfg.dep_count - 1; i++)
+        cfg.deps[i] = cfg.deps[i + 1];
+    cfg.dep_count--;
+
+    pkg_remove(name, GOOSE_PKG_DIR);
+    config_save(MOXY_CONFIG, &cfg);
+
+    /* remove from lock file */
+    int lfound = -1;
+    for (int i = 0; i < lf.count; i++) {
+        if (strcmp(lf.entries[i].name, name) == 0) {
+            lfound = i;
+            break;
+        }
+    }
+    if (lfound >= 0) {
+        for (int i = lfound; i < lf.count - 1; i++)
+            lf.entries[i] = lf.entries[i + 1];
+        lf.count--;
+        lock_save(MOXY_LOCK, &lf);
+    }
+
+    info("Removed", "%s", name);
+    return 0;
+}
+
+static int cmd_update(int argc, char **argv) {
+    (void)argc; (void)argv;
+
+    if (!is_project_mode()) {
+        err("no %s found", MOXY_CONFIG);
+        return 1;
+    }
+
+    Config cfg;
+    LockFile lf;
+    if (load_project(&cfg, &lf) != 0) return 1;
+
+    info("Updating", "packages");
+    pkg_update_all(&cfg, &lf);
+    lock_save(MOXY_LOCK, &lf);
+
+    info("Updated", "%d package%s", cfg.dep_count,
+         cfg.dep_count == 1 ? "" : "s");
+    return 0;
+}
+
+static int cmd_clean(int argc, char **argv) {
+    (void)argc; (void)argv;
+    return build_clean();
+}
+
+static int cmd_install(int argc, char **argv) {
+    const char *prefix = "/usr/local";
+
+    for (int i = 2; i < argc - 1; i++) {
+        if (strcmp(argv[i], "--prefix") == 0)
+            prefix = argv[++i];
+    }
+
+    if (!is_project_mode()) {
+        err("no %s found", MOXY_CONFIG);
+        return 1;
+    }
+
+    if (cmd_build_project(1) != 0) return 1;
+
+    Config cfg;
+    config_load(MOXY_CONFIG, &cfg);
+
+    char src[512], dst[512];
+    snprintf(src, sizeof(src), "%s/release/%s", GOOSE_BUILD, cfg.name);
+    snprintf(dst, sizeof(dst), "%s/bin", prefix);
+    fs_mkdir(dst);
+
+    char cmd[1024];
+    snprintf(cmd, sizeof(cmd), "install -m 755 '%s' '%s/%s'", src, dst, cfg.name);
+    if (system(cmd) != 0) {
+        err("install failed");
+        return 1;
+    }
+
+    info("Installed", "%s/%s", dst, cfg.name);
+    return 0;
+}
+
+/* ── usage / main ────────────────────────────────────────────── */
+
 static void print_usage(void) {
     fprintf(stderr,
         "usage: moxy <command> [args]\n"
         "\n"
-        "commands:\n"
+        "transpile:\n"
+        "  <file.mxy>                 transpile to C on stdout\n"
         "  run <file.mxy> [args]      transpile, compile, and execute\n"
         "  build <file.mxy> [-o out]  transpile and compile to binary\n"
         "  test [files...]            discover and run *_test.mxy files\n"
+        "\n"
+        "project:\n"
+        "  new <name>                 create new project\n"
+        "  init                       initialize project in current directory\n"
+        "  build [--release]          build project from moxy.yaml\n"
+        "  run [--release] [args]     build and run project\n"
+        "  clean                      remove build directory\n"
+        "  install [--prefix PATH]    release build and install\n"
+        "\n"
+        "packages:\n"
+        "  add <git-url> [opts]       add dependency (--name, --version)\n"
+        "  remove <name>              remove dependency\n"
+        "  update                     update all dependencies\n"
+        "\n"
+        "tools:\n"
         "  fmt [file.mxy] [--check]   format source files\n"
         "  lint [file.mxy]            lint source files for issues\n"
-        "  <file.mxy>                 transpile to C on stdout\n"
     );
 }
 
@@ -619,19 +1144,16 @@ int main(int argc, char **argv) {
         return 1;
     }
 
+    /* parse global flags */
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "--enable-async") == 0) {
             moxy_async_enabled = 1;
-            for (int j = i; j < argc - 1; j++)
-                argv[j] = argv[j + 1];
-            argc--;
-            i--;
+            for (int j = i; j < argc - 1; j++) argv[j] = argv[j + 1];
+            argc--; i--;
         } else if (strcmp(argv[i], "--enable-arc") == 0) {
             moxy_arc_enabled = 1;
-            for (int j = i; j < argc - 1; j++)
-                argv[j] = argv[j + 1];
-            argc--;
-            i--;
+            for (int j = i; j < argc - 1; j++) argv[j] = argv[j + 1];
+            argc--; i--;
         }
     }
 
@@ -640,32 +1162,34 @@ int main(int argc, char **argv) {
         return 1;
     }
 
-    if (strcmp(argv[1], "run") == 0) {
-        return cmd_run(argc, argv);
-    }
+    const char *cmd = argv[1];
 
-    if (strcmp(argv[1], "build") == 0) {
-        return cmd_build(argc, argv);
-    }
+    if (strcmp(cmd, "run") == 0)     return cmd_run(argc, argv);
+    if (strcmp(cmd, "build") == 0)   return cmd_build(argc, argv);
+    if (strcmp(cmd, "test") == 0)    return cmd_test(argc, argv);
+    if (strcmp(cmd, "fmt") == 0)     return cmd_fmt(argc, argv);
+    if (strcmp(cmd, "lint") == 0)    return cmd_lint(argc, argv);
+    if (strcmp(cmd, "new") == 0)     return cmd_new(argc, argv);
+    if (strcmp(cmd, "init") == 0)    return cmd_init(argc, argv);
+    if (strcmp(cmd, "add") == 0)     return cmd_add(argc, argv);
+    if (strcmp(cmd, "remove") == 0)  return cmd_remove(argc, argv);
+    if (strcmp(cmd, "update") == 0)  return cmd_update(argc, argv);
+    if (strcmp(cmd, "clean") == 0)   return cmd_clean(argc, argv);
+    if (strcmp(cmd, "install") == 0) return cmd_install(argc, argv);
 
-    if (strcmp(argv[1], "test") == 0) {
-        return cmd_test(argc, argv);
-    }
-
-    if (strcmp(argv[1], "fmt") == 0) {
-        return cmd_fmt(argc, argv);
-    }
-
-    if (strcmp(argv[1], "lint") == 0) {
-        return cmd_lint(argc, argv);
-    }
-
-    if (strcmp(argv[1], "--help") == 0 || strcmp(argv[1], "-h") == 0) {
+    if (strcmp(cmd, "--help") == 0 || strcmp(cmd, "-h") == 0) {
         print_usage();
         return 0;
     }
 
-    const char *c_code = transpile(argv[1]);
-    printf("%s", c_code);
-    return 0;
+    /* bare .mxy file → transpile to stdout */
+    if (ends_with(cmd, ".mxy")) {
+        const char *c_code = transpile(cmd);
+        printf("%s", c_code);
+        return 0;
+    }
+
+    fprintf(stderr, "moxy: unknown command '%s'\n", cmd);
+    print_usage();
+    return 1;
 }
