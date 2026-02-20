@@ -21,13 +21,17 @@ Moxy keeps everything good about C — same types, same control flow, same menta
 | Error handling | `Result<int> r = Ok(42);` | Manual result struct |
 | Dynamic arrays | `int[] nums = [1, 2, 3];` | Manual malloc + realloc |
 | Hash maps | `map[string,int] m = {};` | Manual implementation |
+| Range iteration | `for i in 0..10 { ... }` | `for (int i = 0; i < 10; i++)` |
+| Collection iteration | `for x in list { ... }` | Manual index loop |
 | Pipe operator | `x \|> double_it() \|> add(1)` | `add(double_it(x), 1)` |
+| Lambdas | `(int x) => x * 2` | Function pointer + separate definition |
 | Async/Futures | `Future<int> f(int x) { return x*2; }` | pthread spawn + join |
 | Await | `int val = await f(21);` | pthread_join + extract |
 | ARC | `int[] nums = [1, 2, 3];` | Ref-counted heap alloc + auto release |
+| Standard library | `#include "std/math.mxy"` | N/A |
 | File includes | `#include "math.mxy"` | N/A (textual inlining) |
 
-Everything else is standard C: `if`/`else`, `for`, `while`, `return`, all arithmetic/comparison/logical operators, functions with typed parameters, recursion, global variables, and comments.
+Everything else is standard C: `if`/`else`, `for`, `while`, `return`, structs, unions, typedefs, pointers, `switch`/`case`, `do`/`while`, `goto`, `sizeof`, all arithmetic/comparison/logical/bitwise operators, functions with typed parameters, recursion, global variables, and comments.
 
 ## Installation
 
@@ -86,7 +90,7 @@ asdf set --home moxy latest
 Requires a C compiler and [goose](https://github.com/wess/goose):
 
 ```sh
-git clone https://github.com/wess/moxy.git
+git clone --recursive https://github.com/wess/moxy.git
 cd moxy
 goose build
 ```
@@ -120,12 +124,28 @@ That's it — one command to transpile, compile, and execute.
 ### Commands
 
 ```
-moxy run <file.mxy> [args]      transpile, compile, and execute
-moxy build <file.mxy> [-o out]  transpile and compile to binary
-moxy test [files...]            discover and run *_test.mxy files
-moxy fmt [file.mxy] [--check]   format source (in-place or check-only)
-moxy lint [file.mxy]            lint source for issues
-moxy <file.mxy>                 transpile to C on stdout
+transpile:
+  <file.mxy>                 transpile to C on stdout
+  run <file.mxy> [args]      transpile, compile, and execute
+  build <file.mxy> [-o out]  transpile and compile to binary
+  test [files...]            discover and run *_test.mxy files
+
+project:
+  new <name>                 create new project
+  init                       initialize project in current directory
+  build [--release]          build project from moxy.yaml
+  run [--release] [args]     build and run project
+  clean                      remove build directory
+  install [--prefix PATH]    release build and install
+
+packages:
+  add <git-url> [opts]       add dependency (--name, --version)
+  remove <name>              remove dependency
+  update                     update all dependencies
+
+tools:
+  fmt [file.mxy] [--check]   format source files
+  lint [file.mxy]            lint source files for issues
 ```
 
 **Flags:**
@@ -238,26 +258,44 @@ void main() {
     print(i);
   }
 
-  // for with custom step
-  for (int k = 0; k < 10; k += 3) {
-    print(k);
-  }
-
   // while loops
   int countdown = 3;
   while (countdown > 0) {
     print(countdown);
     countdown--;
   }
-
-  // assignment operators
-  int val = 10;
-  val += 5;
-  val -= 3;
-  val *= 2;
-  val /= 6;
 }
 ```
+
+### For-In Loops
+
+Iterate over ranges, lists, and maps without manual indexing:
+
+```
+void main() {
+  // range: 0, 1, 2, 3, 4
+  for i in 0..5 {
+    print(i);
+  }
+
+  // list iteration
+  int[] nums = [10, 20, 30];
+  for n in nums {
+    print(n);
+  }
+
+  // map iteration with key-value
+  map[string,int] ages = {};
+  ages.set("alice", 30);
+  ages.set("bob", 25);
+  for k, v in ages {
+    print(k);
+    print(v);
+  }
+}
+```
+
+`for x in 0..n` generates a standard C for loop. `for x in list` iterates over list elements. `for k, v in map` iterates over map key-value pairs.
 
 ### Enums and Pattern Matching
 
@@ -382,6 +420,31 @@ void main() {
 
 The pipe operator passes the left-hand value as the first argument to the right-hand function. `a |> f(b)` becomes `f(a, b)`. Pipes are left-associative, so `a |> f() |> g()` becomes `g(f(a))`.
 
+### Lambdas
+
+Pass inline functions as arguments:
+
+```
+int apply(int x, int fn(int)) {
+  return fn(x);
+}
+
+void main() {
+  // single expression
+  int a = apply(5, (int x) => x * 2);
+  print(a);    // 10
+
+  // block body
+  int b = apply(10, (int x) => {
+    int result = x + 1;
+    return result * 3;
+  });
+  print(b);    // 33
+}
+```
+
+Lambdas are lifted to top-level C functions at compile time. They can be passed anywhere a function pointer is expected.
+
 ### Async / Futures
 
 Run concurrent work with `Future<T>` and `await` (requires `--enable-async`):
@@ -435,6 +498,33 @@ moxy --enable-arc run arc.mxy
 
 ARC-managed types are passed as pointers and automatically retained/released when entering and leaving functions, if-blocks, loops, and match arms. Returning an ARC value transfers ownership — the returned object is not released.
 
+### Standard Library
+
+Moxy ships with an embedded standard library. Import modules with `#include`:
+
+```
+#include "std/math.mxy"
+#include "std/string.mxy"
+#include "std/debug.mxy"
+
+void main() {
+  print(max_int(3, 7));              // 7
+  print(clamp_int(15, 0, 10));       // 10
+  print(str_contains("hello", "ell"));  // 1
+  todo("not implemented yet");       // exits with message
+}
+```
+
+| Module | Functions |
+|--------|-----------|
+| `std/math.mxy` | `abs_int`, `min_int`, `max_int`, `clamp_int` |
+| `std/string.mxy` | `str_len`, `str_eq`, `str_contains`, `str_starts_with`, `str_ends_with` |
+| `std/io.mxy` | `eprintln`, `readln` |
+| `std/debug.mxy` | `panic`, `todo`, `unreachable` |
+| `std/test.mxy` | `assert_eq_int`, `assert_eq_str`, `assert_true`, `assert_false` |
+
+Standard library modules are embedded in the binary — no external files needed at runtime.
+
 ### Includes
 
 Split code across multiple files:
@@ -482,6 +572,41 @@ void main() {
 /* block
    comment */
 ```
+
+## Project Mode
+
+For multi-file projects, Moxy uses a `moxy.yaml` config file (powered by [goose](https://github.com/wess/goose)):
+
+```sh
+moxy new myapp        # scaffold a new project
+cd myapp
+moxy run              # build and run from moxy.yaml
+moxy build --release  # optimized build
+moxy install          # install to /usr/local/bin
+```
+
+Projects support dependencies from git:
+
+```sh
+moxy add https://github.com/user/lib.git --name lib --version v1.0
+moxy remove lib
+moxy update           # update all dependencies
+```
+
+Async and ARC flags are auto-detected from the source when running in project mode.
+
+## Formatter and Linter
+
+```sh
+moxy fmt              # format all .mxy files recursively
+moxy fmt file.mxy     # format a single file
+moxy fmt --check      # check formatting without modifying
+
+moxy lint             # lint all .mxy files recursively
+moxy lint file.mxy    # lint a single file
+```
+
+The formatter reads settings from `moxyfmt.yaml` if present. The linter checks for unused variables, empty blocks, and shadowed variables.
 
 ## What the Output Looks Like
 
@@ -588,17 +713,27 @@ src/
   diag.h/c       — error and warning diagnostics
   fmt.h/c        — source formatter
   lint.h/c       — static analysis linter
-  yaml.h/c       — moxyfmt.yaml config parser
-  main.c         — CLI entry point and preprocessor
+  mxyconf.h/c    — moxyfmt.yaml config parser
+  mxystdlib.h/c  — embedded standard library (auto-generated)
+  main.c         — CLI entry point, preprocessor, project mode
+std/
+  math.mxy       — abs, min, max, clamp
+  string.mxy     — length, equality, contains, starts/ends with
+  io.mxy         — eprintln, readln
+  debug.mxy      — panic, todo, unreachable
+  test.mxy       — typed assertions
 tests/
-  *_test.mxy     — test suite (types, lists, maps, enums, functions, control flow, async, arc)
+  *_test.mxy     — test suite
 tools/
   asdf/          — asdf version manager plugin
   editors/zed/   — Zed editor extension
 examples/
   features.mxy   — comprehensive feature showcase
-  async.mxy      — async/futures example (requires --enable-async)
+  lambda.mxy     — lambda / closure examples
+  ccompat.mxy    — C compatibility (structs, pointers, switch, bitwise)
+  async.mxy      — async/futures (requires --enable-async)
   arc.mxy        — ARC example (requires --enable-arc)
+  stdlib.mxy     — standard library usage
   math.mxy       — helper functions (included by features.mxy)
 docs/
   book/          — language reference and architecture
@@ -608,16 +743,16 @@ docs/
 
 ## How It Works
 
-Moxy is a five-stage transpiler written in ~2,300 lines of C:
+Moxy is a five-stage transpiler written in ~6,200 lines of C:
 
 ```
 .mxy source → Preprocessor → Lexer → Parser → AST → Codegen → .c output
 ```
 
-1. **Preprocessor** scans for `#include` directives, inlining `.mxy` files and collecting C headers
+1. **Preprocessor** scans for `#include` directives, inlining `.mxy` files (with stdlib fallback) and collecting C headers
 2. **Lexer** tokenizes the source into a flat token array
 3. **Parser** builds an AST using recursive descent with Pratt-style expression parsing
-4. **Codegen** walks the AST in two passes — first collecting generic type instantiations, then emitting C with monomorphized type definitions, forward declarations, and function bodies
+4. **Codegen** walks the AST in two passes — first collecting generic type instantiations and lambdas, then emitting C with monomorphized type definitions, forward declarations, and function bodies
 
 See [Architecture](docs/book/architecture.md) for the full technical breakdown.
 
