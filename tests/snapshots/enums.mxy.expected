@@ -6,10 +6,6 @@ typedef enum {
     Color_Red,
     Color_Green,
     Color_Blue,
-} Color_Tag;
-
-typedef struct {
-    Color_Tag tag;
 } Color;
 
 typedef enum {
@@ -27,8 +23,8 @@ typedef struct {
 
 
 int main(void) {
-    Color c = (Color){ .tag = Color_Red };
-    switch (c.tag) {
+    Color c = Color_Red;
+    switch (c) {
         case Color_Red: {
             printf("%s\n", "red");
             break;

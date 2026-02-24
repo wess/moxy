@@ -13,7 +13,7 @@ typedef struct { char name[64]; char type[64]; } Sym;
 static Sym syms[256];
 static int nsyms;
 
-typedef struct { char name[64]; Variant variants[16]; int nvariants; } EnumStore;
+typedef struct { char name[64]; Variant variants[16]; int nvariants; int simple; } EnumStore;
 static EnumStore enums[16];
 static int nenums;
 
@@ -358,6 +358,12 @@ static const char *infer_type(Node *n) {
     }
 }
 
+static int is_simple_enum(const char *ename) {
+    for (int i = 0; i < nenums; i++)
+        if (strcmp(enums[i].name, ename) == 0) return enums[i].simple;
+    return 0;
+}
+
 static const char *enum_field_type(const char *ename, const char *vname, int idx) {
     for (int i = 0; i < nenums; i++) {
         if (strcmp(enums[i].name, ename) != 0) continue;
@@ -555,7 +561,7 @@ static void gen_expr(Node *n) {
         emit("%s", n->floatlit.value);
         break;
     case NODE_EXPR_CHARLIT:
-        emit("'%c'", n->charlit.value);
+        emit("'%s'", n->charlit.value);
         break;
     case NODE_EXPR_BOOLLIT:
         emit("%s", n->boollit.value ? "true" : "false");
@@ -591,24 +597,28 @@ static void gen_expr(Node *n) {
     case NODE_EXPR_ENUM_INIT: {
         const char *en = n->enum_init.ename;
         const char *vn = n->enum_init.vname;
-        emit("(%s){ .tag = %s_%s", en, en, vn);
-        for (int i = 0; i < nenums; i++) {
-            if (strcmp(enums[i].name, en) != 0) continue;
-            for (int j = 0; j < enums[i].nvariants; j++) {
-                if (strcmp(enums[i].variants[j].name, vn) != 0) continue;
-                Variant *v = &enums[i].variants[j];
-                if (v->nfields > 0) {
-                    emit(", .%s = { ", vn);
-                    for (int k = 0; k < v->nfields && k < n->enum_init.nargs; k++) {
-                        if (k > 0) emit(", ");
-                        emit(".%s = ", v->fields[k].name);
-                        gen_expr(n->enum_init.args[k]);
+        if (is_simple_enum(en)) {
+            emit("%s_%s", en, vn);
+        } else {
+            emit("(%s){ .tag = %s_%s", en, en, vn);
+            for (int i = 0; i < nenums; i++) {
+                if (strcmp(enums[i].name, en) != 0) continue;
+                for (int j = 0; j < enums[i].nvariants; j++) {
+                    if (strcmp(enums[i].variants[j].name, vn) != 0) continue;
+                    Variant *v = &enums[i].variants[j];
+                    if (v->nfields > 0) {
+                        emit(", .%s = { ", vn);
+                        for (int k = 0; k < v->nfields && k < n->enum_init.nargs; k++) {
+                            if (k > 0) emit(", ");
+                            emit(".%s = ", v->fields[k].name);
+                            gen_expr(n->enum_init.args[k]);
+                        }
+                        emit(" }");
                     }
-                    emit(" }");
                 }
             }
+            emit(" }");
         }
-        emit(" }");
         break;
     }
     case NODE_EXPR_LIST_LIT:
@@ -725,7 +735,18 @@ static void gen_assert(Node *n) {
 static void gen_match(Node *n) {
     const char *target_type = sym_type(n->match_stmt.target);
 
-    emitln("switch (%s.tag) {", n->match_stmt.target);
+    /* detect if matching a simple enum */
+    int simple = 0;
+    if (target_type && is_simple_enum(target_type))
+        simple = 1;
+    if (!simple && n->match_stmt.narms > 0 &&
+        n->match_stmt.arms[0].pattern.enum_name[0])
+        simple = is_simple_enum(n->match_stmt.arms[0].pattern.enum_name);
+
+    if (simple)
+        emitln("switch (%s) {", n->match_stmt.target);
+    else
+        emitln("switch (%s.tag) {", n->match_stmt.target);
     indent++;
 
     for (int i = 0; i < n->match_stmt.narms; i++) {
@@ -1189,10 +1210,26 @@ static void gen_enum(Node *n) {
     enums[nenums].nvariants = n->enum_decl.nvariants;
     for (int i = 0; i < n->enum_decl.nvariants; i++)
         enums[nenums].variants[i] = n->enum_decl.variants[i];
+
+    int has_fields = 0;
+    for (int i = 0; i < n->enum_decl.nvariants; i++)
+        if (n->enum_decl.variants[i].nfields > 0) has_fields = 1;
+
+    enums[nenums].simple = !has_fields;
     nenums++;
 
     const char *name = n->enum_decl.name;
 
+    if (!has_fields) {
+        /* simple enum: plain typedef enum */
+        emit("typedef enum {\n");
+        for (int i = 0; i < n->enum_decl.nvariants; i++)
+            emit("    %s_%s,\n", name, n->enum_decl.variants[i].name);
+        emit("} %s;\n\n", name);
+        return;
+    }
+
+    /* tagged enum: tag + struct wrapper */
     emit("typedef enum {\n");
     for (int i = 0; i < n->enum_decl.nvariants; i++)
         emit("    %s_%s,\n", name, n->enum_decl.variants[i].name);
@@ -1201,26 +1238,20 @@ static void gen_enum(Node *n) {
     emit("typedef struct {\n");
     emit("    %s_Tag tag;\n", name);
 
-    int has_fields = 0;
-    for (int i = 0; i < n->enum_decl.nvariants; i++)
-        if (n->enum_decl.variants[i].nfields > 0) has_fields = 1;
-
-    if (has_fields) {
-        emit("    union {\n");
-        for (int i = 0; i < n->enum_decl.nvariants; i++) {
-            Variant *v = &n->enum_decl.variants[i];
-            if (v->nfields > 0) {
-                emit("        struct {");
-                for (int j = 0; j < v->nfields; j++) {
-                    char fct[128];
-                    c_type_buf(v->fields[j].type, fct);
-                    emit(" %s %s;", fct, v->fields[j].name);
-                }
-                emit(" } %s;\n", v->name);
+    emit("    union {\n");
+    for (int i = 0; i < n->enum_decl.nvariants; i++) {
+        Variant *v = &n->enum_decl.variants[i];
+        if (v->nfields > 0) {
+            emit("        struct {");
+            for (int j = 0; j < v->nfields; j++) {
+                char fct[128];
+                c_type_buf(v->fields[j].type, fct);
+                emit(" %s %s;", fct, v->fields[j].name);
             }
+            emit(" } %s;\n", v->name);
         }
-        emit("    };\n");
     }
+    emit("    };\n");
 
     emit("} %s;\n\n", name);
 }

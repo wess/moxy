@@ -8,6 +8,22 @@
 static Token *toks;
 static int pos;
 
+static char user_types[256][64];
+static int nuser_types;
+
+void parser_register_type(const char *name) {
+    if (nuser_types >= 256) return;
+    strncpy(user_types[nuser_types], name, 63);
+    user_types[nuser_types][63] = '\0';
+    nuser_types++;
+}
+
+static int is_user_type(const char *name) {
+    for (int i = 0; i < nuser_types; i++)
+        if (strcmp(user_types[i], name) == 0) return 1;
+    return 0;
+}
+
 static Token peek(void) { return toks[pos]; }
 
 static Token eat(TokenKind kind) {
@@ -22,20 +38,25 @@ static Token eat(TokenKind kind) {
 
 static Token advance(void) { return toks[pos++]; }
 
-static int is_type_start(Token t) {
+static int is_known_type(Token t) {
     return t.kind == TOK_STRING_KW || t.kind == TOK_INT_KW ||
            t.kind == TOK_FLOAT_KW || t.kind == TOK_DOUBLE_KW ||
            t.kind == TOK_CHAR_KW || t.kind == TOK_BOOL_KW ||
            t.kind == TOK_LONG_KW || t.kind == TOK_SHORT_KW ||
            t.kind == TOK_VOID_KW || t.kind == TOK_RESULT_KW ||
            t.kind == TOK_FUTURE_KW ||
-           t.kind == TOK_MAP_KW || t.kind == TOK_IDENT ||
+           t.kind == TOK_MAP_KW ||
            t.kind == TOK_STRUCT_KW || t.kind == TOK_UNION_KW ||
            t.kind == TOK_UNSIGNED_KW || t.kind == TOK_SIGNED_KW ||
            t.kind == TOK_CONST_KW || t.kind == TOK_STATIC_KW ||
            t.kind == TOK_EXTERN_KW || t.kind == TOK_VOLATILE_KW ||
            t.kind == TOK_REGISTER_KW || t.kind == TOK_INLINE_KW ||
-           t.kind == TOK_ENUM_KW;
+           t.kind == TOK_ENUM_KW ||
+           (t.kind == TOK_IDENT && is_user_type(t.text));
+}
+
+static int is_type_start(Token t) {
+    return is_known_type(t) || t.kind == TOK_IDENT;
 }
 
 static void parse_type(char *buf) {
@@ -539,7 +560,8 @@ static Node *parse_primary(void) {
         Node *n = node_new(NODE_EXPR_CHARLIT);
         n->line = t.line;
         n->col = t.col;
-        n->charlit.value = t.text[0];
+        strncpy(n->charlit.value, t.text, 7);
+        n->charlit.value[7] = '\0';
         return n;
     }
 
@@ -1026,11 +1048,16 @@ static Node *parse_if_stmt(void) {
     Node *then_block = node_new(NODE_BLOCK);
     then_block->line = ift.line;
     then_block->col = ift.col;
-    eat(TOK_LBRACE);
-    then_block->block.nstmts = 0;
-    while (peek().kind != TOK_RBRACE)
-        then_block->block.stmts[then_block->block.nstmts++] = parse_stmt();
-    eat(TOK_RBRACE);
+    if (peek().kind == TOK_LBRACE) {
+        eat(TOK_LBRACE);
+        then_block->block.nstmts = 0;
+        while (peek().kind != TOK_RBRACE)
+            then_block->block.stmts[then_block->block.nstmts++] = parse_stmt();
+        eat(TOK_RBRACE);
+    } else {
+        then_block->block.nstmts = 1;
+        then_block->block.stmts[0] = parse_stmt();
+    }
     n->if_stmt.then_body = then_block;
     n->if_stmt.nthen = then_block->block.nstmts;
 
@@ -1047,7 +1074,7 @@ static Node *parse_if_stmt(void) {
             else_block->block.stmts[0] = parse_if_stmt();
             n->if_stmt.else_body = else_block;
             n->if_stmt.nelse = 1;
-        } else {
+        } else if (peek().kind == TOK_LBRACE) {
             Node *else_block = node_new(NODE_BLOCK);
             else_block->line = peek().line;
             else_block->col = peek().col;
@@ -1058,6 +1085,14 @@ static Node *parse_if_stmt(void) {
             eat(TOK_RBRACE);
             n->if_stmt.else_body = else_block;
             n->if_stmt.nelse = else_block->block.nstmts;
+        } else {
+            Node *else_block = node_new(NODE_BLOCK);
+            else_block->line = peek().line;
+            else_block->col = peek().col;
+            else_block->block.nstmts = 1;
+            else_block->block.stmts[0] = parse_stmt();
+            n->if_stmt.else_body = else_block;
+            n->if_stmt.nelse = 1;
         }
     }
 
@@ -1343,8 +1378,19 @@ static Node *parse_stmt(void) {
                 return collect_raw_stmt();
             }
 
+            /* @type'd ident followed by name(...) or name; → raw C */
+            if (is_known_type(t)) {
+                pos = save;
+                return collect_raw_stmt();
+            }
+
             pos = save;
         } else {
+            /* @type'd ident not followed by ident → raw C decl */
+            if (is_known_type(t)) {
+                pos = save;
+                return collect_raw_stmt();
+            }
             pos = save;
         }
     }
@@ -1571,10 +1617,25 @@ Node *parse(Token *tokens, int ntokens) {
                 pos++;
 
                 if (peek().kind == TOK_LPAREN) {
-                    pos--; /* unconsume ident — parse_func will re-read */
-                    Token nm = eat(TOK_IDENT);
-                    prog->program.decls[prog->program.ndecls++] =
-                        parse_func(type, nm.text);
+                    /* lookahead past params to check for forward decl */
+                    int lk = pos;
+                    int d = 0;
+                    while (toks[lk].kind != TOK_EOF) {
+                        if (toks[lk].kind == TOK_LPAREN) d++;
+                        if (toks[lk].kind == TOK_RPAREN) d--;
+                        lk++;
+                        if (d == 0) break;
+                    }
+                    if (toks[lk].kind == TOK_SEMI) {
+                        /* forward declaration — collect as raw */
+                        pos = save;
+                        prog->program.decls[prog->program.ndecls++] = collect_raw_toplevel();
+                    } else {
+                        pos--; /* unconsume ident — parse_func will re-read */
+                        Token nm = eat(TOK_IDENT);
+                        prog->program.decls[prog->program.ndecls++] =
+                            parse_func(type, nm.text);
+                    }
                 } else if (peek().kind == TOK_EQ) {
                     eat(TOK_EQ);
                     Node *n = node_new(NODE_VAR_DECL);

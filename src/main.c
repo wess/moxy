@@ -121,6 +121,27 @@ static char *preprocess(const char *src, const char *srcpath) {
         const char *lp = p;
         while (*lp == ' ' || *lp == '\t') lp++;
 
+        if (*lp == '@' && strncmp(lp, "@type", 5) == 0) {
+            const char *cur = lp + 5;
+            while (cur < p + linelen) {
+                while (cur < p + linelen && (*cur == ' ' || *cur == '\t' || *cur == ',')) cur++;
+                if (cur >= p + linelen || *cur == ';') break;
+                const char *start = cur;
+                while (cur < p + linelen && *cur != ',' && *cur != ';' && *cur != ' ' && *cur != '\t') cur++;
+                if (cur > start) {
+                    char tname[64];
+                    int tlen = (int)(cur - start);
+                    if (tlen > 63) tlen = 63;
+                    memcpy(tname, start, tlen);
+                    tname[tlen] = '\0';
+                    parser_register_type(tname);
+                }
+            }
+            p += linelen;
+            if (eol) p++;
+            continue;
+        }
+
         if (*lp == '#' && strncmp(lp, "#include", 8) != 0) {
             char directive[512];
             int dlen = linelen < 511 ? linelen : 511;

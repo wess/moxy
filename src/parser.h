@@ -5,5 +5,6 @@
 #include "ast.h"
 
 Node *parse(Token *tokens, int ntokens);
+void parser_register_type(const char *name);
 
 #endif

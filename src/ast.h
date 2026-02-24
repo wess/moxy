@@ -96,7 +96,7 @@ struct Node {
         struct { int value; char text[64]; } intlit;
         struct { char value[64]; } floatlit;
         struct { char value[256]; } strlit;
-        struct { char value; } charlit;
+        struct { char value[8]; } charlit;
         struct { int value; } boollit;
         struct { char ename[64]; char vname[64]; Node *args[8]; int nargs; } enum_init;
         struct { Node *items[64]; int nitems; } list_lit;
