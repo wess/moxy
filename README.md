@@ -133,8 +133,8 @@ transpile:
 project:
   new <name>                 create new project
   init                       initialize project in current directory
-  build [--release]          build project from moxy.yaml
-  run [--release] [args]     build and run project
+  build [--release] [-p member]  build project or workspace member
+  run [--release] [-p member]    build and run project or member
   clean                      remove build directory
   install [--prefix PATH]    release build and install
 
@@ -595,6 +595,48 @@ moxy update           # update all dependencies
 
 Async and ARC flags are auto-detected from the source when running in project mode.
 
+### Workspaces
+
+For multi-project repositories, Moxy supports Cargo-style workspaces. A root `moxy.yaml` lists member directories, each with their own `moxy.yaml`:
+
+```yaml
+# root moxy.yaml
+workspace:
+  members:
+    - "mylib"
+    - "myapp"
+```
+
+Members can be libraries or binaries:
+
+```yaml
+# mylib/moxy.yaml
+project:
+  name: "mylib"
+  type: "lib"
+```
+
+```yaml
+# myapp/moxy.yaml
+project:
+  name: "myapp"
+dependencies:
+  mylib:
+    path: "../mylib"
+```
+
+Build and run workspace members:
+
+```sh
+moxy build                # build all members in dependency order
+moxy build -p mylib       # build just one member
+moxy run                  # build all, run the binary member
+moxy run -p myapp         # build and run a specific member
+moxy build --release      # release build of entire workspace
+```
+
+Libraries produce static archives (`build/lib/lib{name}.a`). Binaries that depend on workspace libraries automatically get the right include paths and link flags. Members are built in topological order based on their dependencies.
+
 ## Formatter and Linter
 
 ```sh
@@ -727,6 +769,7 @@ tests/
 tools/
   asdf/          — asdf version manager plugin
   editors/zed/   — Zed editor extension
+  moxylsp/       — Moxy language server (LSP)
 examples/
   features.mxy   — comprehensive feature showcase
   lambda.mxy     — lambda / closure examples

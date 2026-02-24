@@ -99,6 +99,46 @@ Two-pass code generation:
 
 **Include deduplication**: When the user specifies `#include <stdlib.h>` via source-level `#include` and the codegen would also auto-generate it (because lists or maps are used), only one copy is emitted.
 
+## Workspace Orchestration
+
+Moxy supports Cargo-style workspaces for multi-project repositories. A root `moxy.yaml` defines workspace members:
+
+```yaml
+workspace:
+  members:
+    - "mylib"
+    - "myapp"
+```
+
+Each member has its own `moxy.yaml`. Members can be libraries (`type: "lib"`) or binaries (default).
+
+### Build flow
+
+1. **Load** — the root config is loaded, detecting `ws_member_count > 0`
+2. **Adjust** — each member's config paths are adjusted relative to workspace root via `ws_adjust_config()` (prepends member directory to `src_dir`, `includes`, and path dependencies)
+3. **Fetch** — external dependencies (git deps) are fetched for all members
+4. **Sort** — members are topologically sorted by inter-member dependencies (`ws_topo_visit()`)
+5. **Build** — each member is built in order:
+   - `.mxy` files are transpiled to `build/gen/{member}/`
+   - Library members compile to `build/lib/lib{name}.a` via `build_library()` (individual `.o` compilation + `ar rcs`)
+   - Binary members compile to `build/{debug|release}/{name}` via `build_project_at()`, with auto-injected `-L build/lib -l{dep}` flags and include paths from workspace library dependencies
+
+### Target filtering
+
+With `-p <member>`, `ws_collect_deps()` computes the transitive closure of that member's workspace dependencies, and only those members are built (in dependency order).
+
+### Key functions
+
+| Function | Purpose |
+|----------|---------|
+| `ws_adjust_config()` | Prepend member dir to relative paths |
+| `ws_find_member()` | Lookup member by name |
+| `ws_topo_visit()` | Topological sort with cycle detection |
+| `ws_collect_deps()` | Transitive dependency closure for `-p` |
+| `build_workspace()` | Full workspace build orchestration |
+| `build_library()` | Compile sources → `.o` → `.a` archive |
+| `build_project_at()` | Compile sources with parameterized gen_dir |
+
 ## Build System
 
 Moxy is built with [goose](https://github.com/wess/goose), a Cargo-inspired C build tool. The `goose.yaml` config:

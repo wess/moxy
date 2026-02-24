@@ -352,9 +352,7 @@ static void collect_mxy_files(const char *dir, char files[][512], int *count, in
     closedir(d);
 }
 
-static int transpile_project(const Config *cfg) {
-    char gen_dir[512];
-    snprintf(gen_dir, sizeof(gen_dir), "%s/gen", GOOSE_BUILD);
+static int transpile_project_to(const Config *cfg, const char *gen_dir) {
     fs_mkdir(GOOSE_BUILD);
     fs_mkdir(gen_dir);
 
@@ -391,6 +389,12 @@ static int transpile_project(const Config *cfg) {
     }
 
     return 0;
+}
+
+static int transpile_project(const Config *cfg) {
+    char gen_dir[512];
+    snprintf(gen_dir, sizeof(gen_dir), "%s/gen", GOOSE_BUILD);
+    return transpile_project_to(cfg, gen_dir);
 }
 
 /* ── commands ────────────────────────────────────────────────── */
@@ -512,10 +516,180 @@ static int load_project(Config *cfg, LockFile *lf) {
     return 0;
 }
 
-static int cmd_build_project(int release) {
+/* ── workspace support ──────────────────────────────────────── */
+
+static void ws_adjust_config(Config *cfg, const char *member_dir) {
+    char tmp[MAX_PATH_LEN];
+
+    snprintf(tmp, sizeof(tmp), "%s/%s", member_dir, cfg->src_dir);
+    strncpy(cfg->src_dir, tmp, MAX_PATH_LEN - 1);
+
+    for (int i = 0; i < cfg->include_count; i++) {
+        snprintf(tmp, sizeof(tmp), "%s/%s", member_dir, cfg->includes[i]);
+        strncpy(cfg->includes[i], tmp, MAX_PATH_LEN - 1);
+    }
+
+    for (int i = 0; i < cfg->dep_count; i++) {
+        if (cfg->deps[i].path[0]) {
+            snprintf(tmp, sizeof(tmp), "%s/%s", member_dir, cfg->deps[i].path);
+            strncpy(cfg->deps[i].path, tmp, MAX_PATH_LEN - 1);
+        }
+    }
+}
+
+static int ws_find_member(const Config members[], int count, const char *name) {
+    for (int i = 0; i < count; i++)
+        if (strcmp(members[i].name, name) == 0) return i;
+    return -1;
+}
+
+static int ws_topo_visit(int idx, const Config members[], int count,
+                          int *visited, int *order, int *order_count) {
+    if (visited[idx] == 2) return 0;
+    if (visited[idx] == 1) {
+        err("circular dependency involving '%s'", members[idx].name);
+        return -1;
+    }
+    visited[idx] = 1;
+
+    for (int d = 0; d < members[idx].dep_count; d++) {
+        int dep_idx = ws_find_member(members, count, members[idx].deps[d].name);
+        if (dep_idx >= 0) {
+            if (ws_topo_visit(dep_idx, members, count, visited, order, order_count) != 0)
+                return -1;
+        }
+    }
+
+    visited[idx] = 2;
+    order[(*order_count)++] = idx;
+    return 0;
+}
+
+static void ws_collect_deps(int idx, const Config members[], int n,
+                             int *needed, int *need_count) {
+    for (int k = 0; k < *need_count; k++)
+        if (needed[k] == idx) return;
+
+    for (int d = 0; d < members[idx].dep_count; d++) {
+        int dep_idx = ws_find_member(members, n, members[idx].deps[d].name);
+        if (dep_idx >= 0)
+            ws_collect_deps(dep_idx, members, n, needed, need_count);
+    }
+
+    needed[(*need_count)++] = idx;
+}
+
+static int build_workspace(int release, const char *target) {
+    Config root;
+    LockFile lf;
+    if (load_project(&root, &lf) != 0) return 1;
+
+    int n = root.ws_member_count;
+    if (n == 0) {
+        err("no workspace members defined");
+        return 1;
+    }
+
+    static Config members[MAX_WS_MEMBERS];
+    memset(members, 0, sizeof(members));
+    for (int i = 0; i < n; i++) {
+        char cfg_path[512];
+        snprintf(cfg_path, sizeof(cfg_path), "%s/%s", root.ws_members[i], MOXY_CONFIG);
+        if (config_load(cfg_path, &members[i]) != 0) {
+            err("failed to load %s", cfg_path);
+            return 1;
+        }
+        ws_adjust_config(&members[i], root.ws_members[i]);
+    }
+
+    /* fetch external deps */
+    for (int i = 0; i < n; i++) {
+        if (members[i].dep_count > 0)
+            pkg_fetch_all(&members[i], &lf);
+    }
+    lock_save(MOXY_LOCK, &lf);
+
+    /* determine build order */
+    int build_set[MAX_WS_MEMBERS];
+    int build_count = 0;
+
+    if (target) {
+        int tidx = ws_find_member(members, n, target);
+        if (tidx < 0) {
+            err("workspace member '%s' not found", target);
+            return 1;
+        }
+        ws_collect_deps(tidx, members, n, build_set, &build_count);
+    } else {
+        int visited[MAX_WS_MEMBERS] = {0};
+        for (int i = 0; i < n; i++) {
+            if (ws_topo_visit(i, members, n, visited, build_set, &build_count) != 0)
+                return 1;
+        }
+    }
+
+    /* create gen parent directory */
+    fs_mkdir(GOOSE_BUILD);
+    char gen_parent[512];
+    snprintf(gen_parent, sizeof(gen_parent), "%s/gen", GOOSE_BUILD);
+    fs_mkdir(gen_parent);
+
+    /* build each member in dependency order */
+    for (int i = 0; i < build_count; i++) {
+        int idx = build_set[i];
+        int is_lib = strcmp(members[idx].type, "lib") == 0;
+
+        info("Building", "%s (%s)", members[idx].name,
+             is_lib ? "library" : "binary");
+
+        char gen_dir[512];
+        snprintf(gen_dir, sizeof(gen_dir), "%s/gen/%s", GOOSE_BUILD, members[idx].name);
+        fs_mkdir(gen_dir);
+
+        if (transpile_project_to(&members[idx], gen_dir) != 0)
+            return 1;
+
+        if (is_lib) {
+            if (build_library(&members[idx], release, gen_dir) != 0)
+                return 1;
+        } else {
+            /* inject -L/-l and include paths from workspace library deps */
+            char lib_dir[512];
+            snprintf(lib_dir, sizeof(lib_dir), "%s/lib", GOOSE_BUILD);
+
+            int loff = (int)strlen(members[idx].ldflags);
+            for (int d = 0; d < members[idx].dep_count; d++) {
+                int dep_idx = ws_find_member(members, n, members[idx].deps[d].name);
+                if (dep_idx >= 0 && strcmp(members[dep_idx].type, "lib") == 0) {
+                    loff += snprintf(members[idx].ldflags + loff, 256 - loff,
+                                    "%s-L%s -l%s", loff > 0 ? " " : "",
+                                    lib_dir, members[dep_idx].name);
+
+                    for (int j = 0; j < members[dep_idx].include_count; j++) {
+                        if (members[idx].include_count < MAX_INCLUDES) {
+                            strncpy(members[idx].includes[members[idx].include_count],
+                                    members[dep_idx].includes[j], MAX_PATH_LEN - 1);
+                            members[idx].include_count++;
+                        }
+                    }
+                }
+            }
+
+            if (build_project_at(&members[idx], release, gen_dir) != 0)
+                return 1;
+        }
+    }
+
+    return 0;
+}
+
+static int cmd_build_project(int release, const char *target) {
     Config cfg;
     LockFile lf;
     if (load_project(&cfg, &lf) != 0) return 1;
+
+    if (cfg.ws_member_count > 0)
+        return build_workspace(release, target);
 
     if (cfg.dep_count > 0) {
         pkg_fetch_all(&cfg, &lf);
@@ -528,11 +702,67 @@ static int cmd_build_project(int release) {
     return 0;
 }
 
-static int cmd_run_project(int release, int argc, char **argv, int arg_offset) {
-    if (cmd_build_project(release) != 0) return 1;
-
+static int cmd_run_project(int release, const char *target, int argc, char **argv, int arg_offset) {
     Config cfg;
-    config_load(MOXY_CONFIG, &cfg);
+    LockFile lf;
+    if (load_project(&cfg, &lf) != 0) return 1;
+
+    /* workspace mode: determine which binary to run */
+    char ws_target[MAX_NAME_LEN] = {0};
+    if (cfg.ws_member_count > 0) {
+        if (target) {
+            strncpy(ws_target, target, MAX_NAME_LEN - 1);
+        } else {
+            int bin_count = 0;
+            for (int i = 0; i < cfg.ws_member_count; i++) {
+                char mpath[512];
+                snprintf(mpath, sizeof(mpath), "%s/%s", cfg.ws_members[i], MOXY_CONFIG);
+                Config mcfg;
+                if (config_load(mpath, &mcfg) == 0 && strcmp(mcfg.type, "lib") != 0) {
+                    strncpy(ws_target, mcfg.name, MAX_NAME_LEN - 1);
+                    bin_count++;
+                }
+            }
+            if (bin_count == 0) {
+                err("no binary members in workspace");
+                return 1;
+            }
+            if (bin_count > 1) {
+                err("multiple binary members; use -p <name> to select");
+                return 1;
+            }
+        }
+
+        if (build_workspace(release, ws_target) != 0) return 1;
+
+        char binpath[512];
+        snprintf(binpath, sizeof(binpath), "%s/%s/%s",
+                 GOOSE_BUILD, release ? "release" : "debug", ws_target);
+
+        int prog_argc = argc - arg_offset;
+        char **prog_argv = malloc(sizeof(char *) * (prog_argc + 2));
+        prog_argv[0] = binpath;
+        for (int i = 0; i < prog_argc; i++)
+            prog_argv[i + 1] = argv[i + arg_offset];
+        prog_argv[prog_argc + 1] = NULL;
+
+        pid_t pid = fork();
+        if (pid == 0) {
+            execv(binpath, prog_argv);
+            perror("moxy: exec failed");
+            _exit(127);
+        }
+
+        int status;
+        waitpid(pid, &status, 0);
+        free(prog_argv);
+
+        if (WIFEXITED(status)) return WEXITSTATUS(status);
+        return 1;
+    }
+
+    /* non-workspace mode */
+    if (cmd_build_project(release, NULL) != 0) return 1;
 
     char binpath[512];
     snprintf(binpath, sizeof(binpath), "%s/%s/%s",
@@ -564,16 +794,19 @@ static int cmd_run_project(int release, int argc, char **argv, int arg_offset) {
 
 static int cmd_run(int argc, char **argv) {
     int release = 0;
+    const char *target = NULL;
     int arg_idx = 2;
 
-    /* scan for --release/-r before file arg */
+    /* scan for --release/-r and -p before file arg */
     for (int i = 2; i < argc; i++) {
         if (strcmp(argv[i], "--release") == 0 || strcmp(argv[i], "-r") == 0) {
             release = 1;
-            /* shift args */
             for (int j = i; j < argc - 1; j++) argv[j] = argv[j + 1];
-            argc--;
-            i--;
+            argc--; i--;
+        } else if (strcmp(argv[i], "-p") == 0 && i + 1 < argc) {
+            target = argv[i + 1];
+            for (int j = i; j < argc - 2; j++) argv[j] = argv[j + 2];
+            argc -= 2; i--;
         }
     }
 
@@ -584,22 +817,25 @@ static int cmd_run(int argc, char **argv) {
     /* project mode */
     if (!is_project_mode()) {
         fprintf(stderr, "usage: moxy run <file.mxy> [args]\n");
-        fprintf(stderr, "   or: moxy run [--release] (in a project with %s)\n", MOXY_CONFIG);
+        fprintf(stderr, "   or: moxy run [--release] [-p member] (in a project with %s)\n", MOXY_CONFIG);
         return 1;
     }
 
-    return cmd_run_project(release, argc, argv, arg_idx);
+    return cmd_run_project(release, target, argc, argv, arg_idx);
 }
 
 static int cmd_build(int argc, char **argv) {
     int release = 0;
     const char *outpath = NULL;
+    const char *target = NULL;
 
     for (int i = 2; i < argc; i++) {
         if (strcmp(argv[i], "--release") == 0 || strcmp(argv[i], "-r") == 0) {
             release = 1;
         } else if (strcmp(argv[i], "-o") == 0 && i + 1 < argc) {
             outpath = argv[++i];
+        } else if (strcmp(argv[i], "-p") == 0 && i + 1 < argc) {
+            target = argv[++i];
         }
     }
 
@@ -610,11 +846,11 @@ static int cmd_build(int argc, char **argv) {
     /* project mode */
     if (!is_project_mode()) {
         fprintf(stderr, "usage: moxy build <file.mxy> [-o out]\n");
-        fprintf(stderr, "   or: moxy build [--release] (in a project with %s)\n", MOXY_CONFIG);
+        fprintf(stderr, "   or: moxy build [--release] [-p member] (in a project with %s)\n", MOXY_CONFIG);
         return 1;
     }
 
-    return cmd_build_project(release);
+    return cmd_build_project(release, target);
 }
 
 /* ── test ────────────────────────────────────────────────────── */
@@ -1168,7 +1404,7 @@ static int cmd_install(int argc, char **argv) {
         return 1;
     }
 
-    if (cmd_build_project(1) != 0) return 1;
+    if (cmd_build_project(1, NULL) != 0) return 1;
 
     Config cfg;
     config_load(MOXY_CONFIG, &cfg);
@@ -1204,8 +1440,8 @@ static void print_usage(void) {
         "project:\n"
         "  new <name>                 create new project\n"
         "  init                       initialize project in current directory\n"
-        "  build [--release]          build project from moxy.yaml\n"
-        "  run [--release] [args]     build and run project\n"
+        "  build [--release] [-p member]  build project or workspace member\n"
+        "  run [--release] [-p member]    build and run project or member\n"
         "  clean                      remove build directory\n"
         "  install [--prefix PATH]    release build and install\n"
         "\n"

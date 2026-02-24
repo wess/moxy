@@ -528,6 +528,43 @@ void main() {
 
 **Cause:** An unrecognized command was passed to `moxy`. Run `moxy --help` for the list of valid commands.
 
+### `error: no workspace members defined`
+
+**Cause:** The root `moxy.yaml` has a `workspace` section but no `members` listed.
+
+**Fix:** Add member directories to the workspace:
+
+```yaml
+workspace:
+  members:
+    - "mylib"
+    - "myapp"
+```
+
+### `error: workspace member 'X' not found`
+
+**Cause:** The `-p` flag references a member name that doesn't match any loaded workspace member's `project.name`.
+
+**Fix:** Check the member names in each member's `moxy.yaml` and use the correct `project.name`, not the directory name.
+
+### `error: no binary members in workspace`
+
+**Cause:** `moxy run` was used in a workspace but no member has a binary type (all are `type: "lib"`).
+
+**Fix:** At least one workspace member must be a binary (omit `type` or use any value other than `"lib"`).
+
+### `error: multiple binary members; use -p <name> to select`
+
+**Cause:** `moxy run` was used in a workspace with multiple binary members and no `-p` flag to specify which one to run.
+
+**Fix:** Use `-p` to select the binary: `moxy run -p myapp`
+
+### `error: circular dependency involving 'X'`
+
+**Cause:** Workspace members have circular dependencies (A depends on B, B depends on A).
+
+**Fix:** Restructure member dependencies to form a DAG (directed acyclic graph). Extract shared code into a separate library member.
+
 ### `moxy: no test files found`
 
 **Hint:** `name test files with _test.mxy suffix (e.g. math_test.mxy)`

@@ -14,3 +14,4 @@ brackets = [
 ]
 word_characters = ["_"]
 tab_size = 2
+language_servers = ["moxylsp"]

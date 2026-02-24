@@ -356,15 +356,53 @@ The `preprocess` function (static in `main.c`) scans source text line-by-line be
 - `#include <header.h>` — same as above, angle-bracket form
 - All other lines pass through unchanged
 
+### Workspace orchestration
+
+When `moxy.yaml` has `workspace.members`, the project commands enter workspace mode:
+
+```c
+static void ws_adjust_config(Config *cfg, const char *member_dir);
+```
+
+Adjusts a member's `Config` so all relative paths (`src_dir`, `includes`, `deps[].path`) are relative to the workspace root instead of the member directory.
+
+```c
+static int ws_find_member(const Config members[], int count, const char *name);
+```
+
+Returns the index of a workspace member by `project.name`, or -1 if not found.
+
+```c
+static int ws_topo_visit(int idx, const Config members[], int count,
+                          int *visited, int *order, int *order_count);
+```
+
+Topological sort via DFS. Detects circular dependencies. Populates `order[]` with member indices in dependency-first order.
+
+```c
+static void ws_collect_deps(int idx, const Config members[], int n,
+                             int *needed, int *need_count);
+```
+
+Collects the transitive closure of workspace dependencies for a specific member. Used when `-p <member>` targets a single member — only builds that member and its deps.
+
+```c
+static int build_workspace(int release, const char *target);
+```
+
+Orchestrates a full workspace build. Loads all member configs, fetches external deps, topologically sorts members, and builds each in order. Library members (`type: "lib"`) produce `build/lib/lib{name}.a` via `build_library()`. Binary members get `-L`/`-l` flags and include paths auto-injected for workspace library deps, then build via `build_project_at()`. If `target` is non-NULL, only builds that member and its transitive deps.
+
 ### CLI usage
 
 ```
 moxy [--enable-async] [--enable-arc] <file.mxy>
 moxy [--enable-async] [--enable-arc] run <file.mxy> [args]
 moxy [--enable-async] [--enable-arc] build <file.mxy> [-o out]
+moxy build [--release] [-p member]
+moxy run [--release] [-p member] [args]
 moxy test [files...]
 moxy fmt [file.mxy] [--check]
 moxy lint [file.mxy]
 ```
 
-Reads the `.mxy` file, preprocesses it, lexes, parses, generates C, and prints the C source to stdout. The `run` command also compiles and executes; `build` compiles to a binary. The `--enable-async` flag sets `moxy_async_enabled` and appends `-lpthread` to the compiler flags. The `--enable-arc` flag sets `moxy_arc_enabled` for reference-counted collections. The `test` command auto-detects async test files (containing `Future<` or `await `) and links pthreads automatically. ARC tests (filename containing `arc` with `[]` or `map[` in source) are also auto-detected.
+Reads the `.mxy` file, preprocesses it, lexes, parses, generates C, and prints the C source to stdout. The `run` command also compiles and executes; `build` compiles to a binary. The `--enable-async` flag sets `moxy_async_enabled` and appends `-lpthread` to the compiler flags. The `--enable-arc` flag sets `moxy_arc_enabled` for reference-counted collections. The `test` command auto-detects async test files (containing `Future<` or `await `) and links pthreads automatically. ARC tests (filename containing `arc` with `[]` or `map[` in source) are also auto-detected. The `-p` flag selects a specific workspace member to build or run.
