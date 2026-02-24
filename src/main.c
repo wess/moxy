@@ -844,6 +844,67 @@ static int cmd_lint(int argc, char **argv) {
     return total_warnings > 0 ? 1 : 0;
 }
 
+/* ── check ───────────────────────────────────────────────────── */
+
+static int cmd_check(int argc, char **argv) {
+    char files[256][512];
+    int nfiles = 0;
+
+    for (int i = 2; i < argc && nfiles < 256; i++) {
+        strncpy(files[nfiles], argv[i], 511);
+        files[nfiles][511] = '\0';
+        nfiles++;
+    }
+
+    if (nfiles == 0)
+        collect_files(".", ".mxy", files, &nfiles, 256);
+
+    if (nfiles == 0) {
+        fprintf(stderr, "moxy: no .mxy files found\n");
+        return 1;
+    }
+
+    int checked = 0;
+    int errors = 0;
+
+    for (int i = 0; i < nfiles; i++) {
+        const char *display = files[i];
+        if (display[0] == '.' && display[1] == '/') display += 2;
+
+        /* transpile validates the full pipeline */
+        codegen_reset_includes();
+        char *raw = read_file(files[i]);
+        char *src = preprocess(raw, files[i]);
+        free(raw);
+
+        diag_init(src, files[i]);
+
+        Lexer lexer;
+        lexer_init(&lexer, src);
+
+        Token tokens[16384];
+        int ntokens = 0;
+        for (;;) {
+            tokens[ntokens] = lexer_next(&lexer);
+            if (tokens[ntokens].kind == TOK_EOF) { ntokens++; break; }
+            ntokens++;
+        }
+
+        Node *program = parse(tokens, ntokens);
+        codegen(program);
+
+        free(src);
+
+        fprintf(stderr, "  ok %s\n", display);
+        checked++;
+    }
+
+    fprintf(stderr, "\n  %d file%s checked, all ok\n", checked,
+            checked == 1 ? "" : "s");
+
+    return errors > 0 ? 1 : 0;
+}
+
 /* ── package management commands ─────────────────────────────── */
 
 static int cmd_new(int argc, char **argv) {
@@ -1135,6 +1196,7 @@ static void print_usage(void) {
         "tools:\n"
         "  fmt [file.mxy] [--check]   format source files\n"
         "  lint [file.mxy]            lint source files for issues\n"
+        "  check [file.mxy]           check syntax without compiling\n"
     );
 }
 
@@ -1169,6 +1231,7 @@ int main(int argc, char **argv) {
     if (strcmp(cmd, "test") == 0)    return cmd_test(argc, argv);
     if (strcmp(cmd, "fmt") == 0)     return cmd_fmt(argc, argv);
     if (strcmp(cmd, "lint") == 0)    return cmd_lint(argc, argv);
+    if (strcmp(cmd, "check") == 0)   return cmd_check(argc, argv);
     if (strcmp(cmd, "new") == 0)     return cmd_new(argc, argv);
     if (strcmp(cmd, "init") == 0)    return cmd_init(argc, argv);
     if (strcmp(cmd, "add") == 0)     return cmd_add(argc, argv);
